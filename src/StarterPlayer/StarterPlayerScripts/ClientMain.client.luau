@@ -19,6 +19,7 @@ local ControllersFolder = PlayerScripts:WaitForChild("Controllers")
 
 local CameraController = require(ControllersFolder:WaitForChild("CameraController") :: ModuleScript)
 local InputController = require(ControllersFolder:WaitForChild("InputController") :: ModuleScript)
+local HUDController = require(ControllersFolder:WaitForChild("HUDController") :: ModuleScript)
 
 print("=========================================")
 print(string.format("[UMBRA Client] Iniciando sesión para: %s (ID: %d)", localPlayer.Name, localPlayer.UserId))
@@ -26,7 +27,11 @@ print("=========================================")
 
 local EstadoActual = "Waiting"
 
--- 2. Escuchar cambios de estado autoritativos desde el Servidor
+-- 2. Iniciar controladores del cliente
+HUDController.Iniciar()
+InputController.Iniciar()
+
+-- 3. Escuchar cambios de estado autoritativos desde el Servidor
 local remotesFolder = ReplicatedStorage:WaitForChild("Remotes", 5)
 if remotesFolder then
 	local remoteSincronizar = remotesFolder:WaitForChild("SincronizarEstadoPartida", 5) :: RemoteEvent?
@@ -36,10 +41,12 @@ if remotesFolder then
 			EstadoActual = nuevoEstado
 			print(string.format("[UMBRA Client] Estado de sesión recibido: %s -> %s", estadoPrevio, nuevoEstado))
 
+			HUDController.ActualizarEstado(nuevoEstado)
+
 			if nuevoEstado == "Playing" then
 				CameraController.Iniciar()
 			elseif nuevoEstado == "GameOver" then
-				print("[UMBRA Client] Partida finalizada. Esperando reinicio de sesión...")
+				print("[UMBRA Client] Partida finalizada. Superviviente derrotado.")
 			elseif nuevoEstado == "Waiting" then
 				CameraController.Detener()
 			end
@@ -47,7 +54,7 @@ if remotesFolder then
 	end
 end
 
--- 3. Gestión segura de la carga del personaje
+-- 4. Gestión segura de la carga del personaje
 local function alCargarPersonaje(character: Model)
 	local humanoid = character:WaitForChild("Humanoid", 10) :: Humanoid?
 	local root = character:WaitForChild("HumanoidRootPart", 10) :: BasePart?
@@ -64,8 +71,5 @@ if localPlayer.Character then
 	task.spawn(alCargarPersonaje, localPlayer.Character)
 end
 localPlayer.CharacterAdded:Connect(alCargarPersonaje)
-
--- 4. Iniciar controlador de inputs del cliente
-InputController.Iniciar()
 
 print("[UMBRA Client] Inicialización del cliente completada con éxito.")

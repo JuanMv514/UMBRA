@@ -14,8 +14,8 @@ local SpawnerService = {
 	Activo = false,
 	TiempoTranscurrido = 0,
 	HilosSpawner = {} :: { thread },
-	RadioMinimoSpawn = 45, -- Fuera del campo visual inmediato
-	RadioMaximoSpawn = 65,
+	RadioMinimoSpawn = 22, -- Perímetro visible cercano
+	RadioMaximoSpawn = 42,
 	MaxEnemigosVivos = 200,
 }
 
