@@ -339,6 +339,8 @@ function MatchmakingService.TransportarParticipantes()
 			"No se puede teletransportar: el Place de supervivencia no está configurado en PlacesConfig."
 		)
 		MatchmakingService.CancelarCuentaAtras()
+		table.clear(MatchmakingService.Participantes)
+		MatchmakingService.NotificarEstado()
 		return
 	end
 
