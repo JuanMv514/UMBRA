@@ -3,6 +3,7 @@
     "*.luau": "luau"
   },
   "luau-tools.diagnosticsEnabled": true,
+  "luau-tools.rojo.enabled": false,
   "robloxLsp.diagnostics.globals": [
     "game",
     "script",
