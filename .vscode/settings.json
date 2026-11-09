@@ -1,0 +1,19 @@
+{
+  "files.associations": {
+    "*.luau": "luau"
+  },
+  "luau-tools.diagnosticsEnabled": true,
+  "robloxLsp.diagnostics.globals": [
+    "game",
+    "script",
+    "workspace",
+    "Vector3",
+    "CFrame",
+    "Color3",
+    "Instance",
+    "Enum",
+    "task",
+    "math",
+    "os"
+  ]
+}
