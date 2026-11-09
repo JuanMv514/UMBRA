@@ -1,0 +1,10 @@
+# OS files
+.DS_Store
+Thumbs.db
+
+# Roblox place local binaries / temporary autosaves
+*.rbxlx.lock
+*.rbxl.lock
+
+# Logs
+*.log
