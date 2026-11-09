@@ -302,10 +302,10 @@ end
 
 function MatchmakingService.CancelarCuentaAtras()
 	MatchmakingService.CuentaActiva = false
-	if MatchmakingService.HiloCuenta then
+	if MatchmakingService.HiloCuenta and MatchmakingService.HiloCuenta ~= coroutine.running() then
 		task.cancel(MatchmakingService.HiloCuenta)
-		MatchmakingService.HiloCuenta = nil
 	end
+	MatchmakingService.HiloCuenta = nil
 	MatchmakingService.SegundosRestantes = MatchmakingService.TiempoCuentaAtras
 	MatchmakingService.NotificarEstado()
 	print("[Matchmaking] Circulo vacio. Cuenta regresiva cancelada.")
@@ -313,10 +313,10 @@ end
 
 function MatchmakingService.TransportarParticipantes()
 	MatchmakingService.CuentaActiva = false
-	if MatchmakingService.HiloCuenta then
+	if MatchmakingService.HiloCuenta and MatchmakingService.HiloCuenta ~= coroutine.running() then
 		task.cancel(MatchmakingService.HiloCuenta)
-		MatchmakingService.HiloCuenta = nil
 	end
+	MatchmakingService.HiloCuenta = nil
 
 	local lista = {}
 	for player in MatchmakingService.Participantes do
