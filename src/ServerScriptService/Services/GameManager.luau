@@ -79,11 +79,7 @@ function GameManager.CambiarEstado(nuevoEstado: EstadoPartida): boolean
 			-- Pequeña pausa preparatoria para asegurar carga de entidades
 			task.wait(1)
 			GameManager.TransicionEnProgreso = false
-			-- Si aún hay jugadores, pasar a Playing
-			local total = 0
-			for _ in GameManager.JugadoresConectados do
-				total += 1
-			end
+			local total = #Players:GetPlayers()
 			if total > 0 then
 				GameManager.CambiarEstado("Playing")
 			else
@@ -150,12 +146,7 @@ function GameManager.OnPlayerRemoving(player: Player)
 	print(string.format("[UMBRA Server] Superviviente desconectado: %s", player.Name))
 
 	-- Comprobar si quedan jugadores en la partida
-	local restantes = 0
-	for _ in GameManager.JugadoresConectados do
-		restantes += 1
-	end
-
-	if restantes == 0 and GameManager.EstadoActual ~= "Waiting" then
+	if #Players:GetPlayers() <= 1 and GameManager.EstadoActual ~= "Waiting" then
 		GameManager.TransicionEnProgreso = false
 		GameManager.CambiarEstado("Waiting")
 	end
@@ -190,7 +181,7 @@ function GameManager.ReiniciarPartida()
 	GameManager.TransicionEnProgreso = false
 
 	-- Reaparecer personajes de jugadores conectados
-	for player in GameManager.JugadoresConectados do
+	for _, player in Players:GetPlayers() do
 		player:LoadCharacter()
 	end
 
