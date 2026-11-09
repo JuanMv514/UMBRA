@@ -1,7 +1,7 @@
 --!strict
 -- ServerMain.server.luau
 -- Punto de entrada único del Servidor (Server Bootstrap) para UMBRA: La última luz.
--- Responsabilidad: Orquestar secuencialmente el ciclo de vida, hordas, spawner y combate automático.
+-- Responsabilidad: Orquestar secuencialmente el ciclo de vida, hordas, spawner, combate y emparejamiento.
 
 local Players = game:GetService("Players")
 local ServerScriptService = game:GetService("ServerScriptService")
@@ -51,7 +51,11 @@ local exitoSpawner, SpawnerService = inicializarServicio("SpawnerService", spawn
 local combatModulo = ServicesFolder:WaitForChild("CombatService") :: ModuleScript
 local exitoCombat, CombatService = inicializarServicio("CombatService", combatModulo, EnemyService)
 
--- 5. Gestión del ciclo de vida de jugadores
+-- 5. Inicializar MatchmakingService (Círculo mágico de emparejamiento y acceso a supervivencia)
+local matchmakingModulo = ServicesFolder:WaitForChild("MatchmakingService") :: ModuleScript
+local exitoMatchmaking, MatchmakingService = inicializarServicio("MatchmakingService", matchmakingModulo, GameManager, SpawnerService, CombatService)
+
+-- 6. Gestión del ciclo de vida de jugadores
 local function registrarJugador(player: Player)
 	local exitoGMPlayer, errGM = pcall(GameManager.OnPlayerAdded, player)
 	if not exitoGMPlayer then
@@ -82,5 +86,5 @@ for _, player in Players:GetPlayers() do
 end
 
 print("=========================================")
-print("  UMBRA — SERVIDOR ACTIVO CON COMBATE    ")
+print(" UMBRA — SERVIDOR ACTIVO CON MATCHMAKING ")
 print("=========================================")

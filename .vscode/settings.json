@@ -2,7 +2,9 @@
   "files.associations": {
     "*.luau": "luau"
   },
+  "robloxLsp.diagnostics.enable": false,
+  "robloxLsp.typeChecking.mode": "Disabled",
   "luau-tools.diagnosticsEnabled": false,
   "luau-tools.rojo.enabled": false,
-  "robloxLsp.typeChecking.mode": "Disabled"
+  "luau-tools.rojo.autoStart": false
 }
