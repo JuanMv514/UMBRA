@@ -9,7 +9,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 export type EstadoPartida = "Waiting" | "Starting" | "Playing" | "GameOver"
 
 local TRANSICIONES_VALIDAS: { [EstadoPartida]: { [EstadoPartida]: boolean } } = {
-	Waiting = { Starting = true },
+	Waiting = { Starting = true, Playing = true },
 	Starting = { Playing = true, Waiting = true },
 	Playing = { GameOver = true, Waiting = true },
 	GameOver = { Starting = true, Waiting = true },
@@ -76,7 +76,7 @@ function GameManager.CambiarEstado(nuevoEstado: EstadoPartida): boolean
 	-- Lógica de entrada a cada estado
 	if nuevoEstado == "Starting" then
 		task.spawn(function()
-			-- Pequeña pausa preparatoria para asegurar carga de entidades
+			-- Pausa preparatoria para asegurar carga de entidades
 			task.wait(1)
 			GameManager.TransicionEnProgreso = false
 			local total = #Players:GetPlayers()
@@ -91,8 +91,14 @@ function GameManager.CambiarEstado(nuevoEstado: EstadoPartida): boolean
 		print("[UMBRA Server] ¡Partida de supervivencia en curso!")
 	elseif nuevoEstado == "GameOver" then
 		print("[UMBRA Server] Fin de la sesión: Superviviente caído.")
+		-- Tras 6 segundos de mostrar la pantalla de derrota, resetear a Waiting (Lobby)
+		task.delay(6, function()
+			if GameManager.EstadoActual == "GameOver" then
+				GameManager.CambiarEstado("Waiting")
+			end
+		end)
 	elseif nuevoEstado == "Waiting" then
-		print("[UMBRA Server] Sesión reseteada. Esperando supervivientes...")
+		print("[UMBRA Server] Sesión en el Santuario (Lobby). Esperando emparejamiento...")
 	end
 
 	GameManager.TransicionEnProgreso = false
@@ -124,10 +130,8 @@ function GameManager.OnPlayerAdded(player: Player)
 		task.spawn(GameManager.OnCharacterAdded, player, player.Character)
 	end
 
-	-- Si estábamos esperando, iniciar la partida
-	if GameManager.EstadoActual == "Waiting" then
-		GameManager.CambiarEstado("Starting")
-	end
+	-- El jugador se mantiene en Waiting (Santuario / Lobby)
+	-- hasta que active el portal / circulo de emparejamiento.
 end
 
 -- Manejador de desconexión de jugador

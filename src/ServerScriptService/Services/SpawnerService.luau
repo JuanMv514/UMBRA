@@ -20,7 +20,9 @@ local SpawnerService = {
 }
 
 function SpawnerService.Iniciar(enemyServiceRef: any)
-	EnemyService = enemyServiceRef
+	if enemyServiceRef then
+		EnemyService = enemyServiceRef
+	end
 	SpawnerService.Activo = true
 	SpawnerService.TiempoTranscurrido = 0
 
