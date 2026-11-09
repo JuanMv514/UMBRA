@@ -34,8 +34,8 @@ local EnemigosConfig: { [string]: EnemigoDef } = {
 		Color = Color3.fromRGB(200, 30, 80),
 		Tamanio = Vector3.new(1.8, 2, 1.8),
 	},
-	GolemSombrío = {
-		Id = "GolemSombrío",
+	GolemSombrio = {
+		Id = "GolemSombrio",
 		Nombre = "Golem Sombrío",
 		VidaBase = 150,
 		VelocidadBase = 7,

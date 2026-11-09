@@ -28,7 +28,7 @@ local OleadasConfig: { OleadaFase } = {
 	{
 		MinutoInicio = 5,
 		MinutoFin = 10,
-		EnemigosPermitidos = { "EspectroMenor", "AcechadorRapido", "GolemSombrío" },
+		EnemigosPermitidos = { "EspectroMenor", "AcechadorRapido", "GolemSombrio" },
 		TasaSpawnPorSegundo = 6.0,
 		MultiplicadorVida = 1.6,
 	},
