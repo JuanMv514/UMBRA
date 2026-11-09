@@ -1,13 +1,19 @@
 --!strict
 -- ServerMain.server.luau
 -- Punto de entrada único del Servidor (Server Bootstrap) para UMBRA: La última luz.
--- Responsabilidad: Orquestar secuencialmente el ciclo de vida, hordas, spawner, combate y emparejamiento.
+-- Responsabilidad: Reconocer autoritativamente si el servidor está ejecutando el LOBBY o la EXPEDICIÓN,
+-- e inicializar únicamente los servicios correspondientes a ese entorno.
 
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
+local ConfigFolder = ReplicatedStorage:WaitForChild("Config")
+local PlacesConfig = require(ConfigFolder:WaitForChild("PlacesConfig") :: ModuleScript)
+
 print("=========================================")
-print("      UMBRA — SERVIDOR INICIANDO         ")
+print(string.format("   UMBRA SERVIDOR — INICIANDO (%s)   ", if PlacesConfig.EsLobby() then "LOBBY" else "EXPEDICIÓN"))
+print(string.format("   PlaceId actual: %d                   ", game.PlaceId))
 print("=========================================")
 
 local ServicesFolder = ServerScriptService:WaitForChild("Services")
@@ -32,36 +38,63 @@ local function inicializarServicio(nombre: string, modulo: ModuleScript, ...: an
 	return true, servicio
 end
 
--- 1. Inicializar GameManager (Cerebro de la sesión)
+-- 1. Inicializar GameManager (Cerebro de la sesión, presente en ambos Places)
 local gmModulo = ServicesFolder:WaitForChild("GameManager") :: ModuleScript
 local exitoGM, GameManager = inicializarServicio("GameManager", gmModulo)
 if not exitoGM or not GameManager then
 	error("[ServerMain] No fue posible inicializar GameManager. Deteniendo arranque.")
 end
 
--- 2. Inicializar EnemyService (Simulación de Hordas)
-local enemyModulo = ServicesFolder:WaitForChild("EnemyService") :: ModuleScript
-local exitoEnemy, EnemyService = inicializarServicio("EnemyService", enemyModulo)
+local EnemyService = nil :: any
+local SpawnerService = nil :: any
+local CombatService = nil :: any
+local MatchmakingService = nil :: any
 
--- 3. Inicializar SpawnerService (Director de Oleadas perimetrales)
-local spawnerModulo = ServicesFolder:WaitForChild("SpawnerService") :: ModuleScript
-local exitoSpawner, SpawnerService = inicializarServicio("SpawnerService", spawnerModulo, EnemyService)
+if PlacesConfig.EsLobby() then
+	-- =========================================================================
+	-- PLACE 1: LOBBY (Santuario del Último Resplandor)
+	-- No se cargan enemigos, ni oleadas, ni combate automático.
+	-- Solo se inicia el portal de emparejamiento.
+	-- =========================================================================
+	print("[ServerMain] Configurando entorno de LOBBY: Hordas, Spawner y Combate DESHABILITADOS.")
 
--- 4. Inicializar CombatService (Combate y Habilidades Automáticas)
-local combatModulo = ServicesFolder:WaitForChild("CombatService") :: ModuleScript
-local exitoCombat, CombatService = inicializarServicio("CombatService", combatModulo, EnemyService)
+	local matchmakingModulo = ServicesFolder:WaitForChild("MatchmakingService") :: ModuleScript
+	local exitoMM, mmInst = inicializarServicio("MatchmakingService", matchmakingModulo, GameManager)
+	MatchmakingService = mmInst
 
--- 5. Inicializar MatchmakingService (Círculo mágico de emparejamiento y acceso a supervivencia)
-local matchmakingModulo = ServicesFolder:WaitForChild("MatchmakingService") :: ModuleScript
-local exitoMatchmaking, MatchmakingService = inicializarServicio("MatchmakingService", matchmakingModulo, GameManager, SpawnerService, CombatService)
+else
+	-- =========================================================================
+	-- PLACE 2: EXPEDICIÓN (Arena de Supervivencia)
+	-- Se cargan e inician los sistemas de combate, oleadas y hordas.
+	-- No se inicia el sistema de emparejamiento.
+	-- =========================================================================
+	print("[ServerMain] Configurando entorno de EXPEDICIÓN: Hordas, Spawner y Combate HABILITADOS.")
 
--- 6. Gestión del ciclo de vida de jugadores
+	local enemyModulo = ServicesFolder:WaitForChild("EnemyService") :: ModuleScript
+	local _, enemyInst = inicializarServicio("EnemyService", enemyModulo)
+	EnemyService = enemyInst
+
+	local spawnerModulo = ServicesFolder:WaitForChild("SpawnerService") :: ModuleScript
+	local _, spawnerInst = inicializarServicio("SpawnerService", spawnerModulo, EnemyService, GameManager)
+	SpawnerService = spawnerInst
+
+	local combatModulo = ServicesFolder:WaitForChild("CombatService") :: ModuleScript
+	local _, combatInst = inicializarServicio("CombatService", combatModulo, EnemyService)
+	CombatService = combatInst
+
+	if GameManager.VincularServicios then
+		GameManager.VincularServicios(SpawnerService, EnemyService, CombatService)
+	end
+end
+
+-- 2. Gestión del ciclo de vida de jugadores
 local function registrarJugador(player: Player)
 	local exitoGMPlayer, errGM = pcall(GameManager.OnPlayerAdded, player)
 	if not exitoGMPlayer then
 		warn(string.format("[ServerMain] Error al registrar GameManager para %s: %s", player.Name, tostring(errGM)))
 	end
 
+	-- Registrar combate únicamente si estamos en la Expedición
 	if CombatService and typeof(CombatService.RegistrarJugador) == "function" then
 		local exitoCombatReg, errCombat = pcall(CombatService.RegistrarJugador, player)
 		if not exitoCombatReg then
@@ -86,5 +119,5 @@ for _, player in Players:GetPlayers() do
 end
 
 print("=========================================")
-print(" UMBRA — SERVIDOR ACTIVO CON MATCHMAKING ")
+print(string.format(" UMBRA — SERVIDOR ACTIVO [%s] ", if PlacesConfig.EsLobby() then "LOBBY" else "EXPEDICIÓN"))
 print("=========================================")

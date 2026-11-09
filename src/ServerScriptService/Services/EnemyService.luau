@@ -2,6 +2,7 @@
 -- EnemyService.luau
 -- Manejador de ciclo de vida, físicas ligeras y daño de la horda en UMBRA.
 -- Diseñado para alto rendimiento (sin Humanoids pesados).
+-- Responsabilidad: Generar, mover, dañar y limpiar autoritativamente a las entidades enemigas.
 
 local Workspace = game:GetService("Workspace")
 local Players = game:GetService("Players")
@@ -24,6 +25,7 @@ export type EnemigoInstancia = {
 }
 
 local EnemyService = {
+	Activo = false,
 	EnemigosActivos = {} :: { [string]: EnemigoInstancia },
 	CarpetaContenedora = nil :: Folder?,
 	ContadorIds = 0,
@@ -32,6 +34,9 @@ local EnemyService = {
 
 -- Inicializa el contenedor en Workspace y el bucle de movimiento
 function EnemyService.Iniciar()
+	if EnemyService.Activo then return end
+	EnemyService.Activo = true
+
 	local carpeta = Workspace:FindFirstChild("HordaEnemigos")
 	if not carpeta then
 		carpeta = Instance.new("Folder")
@@ -41,9 +46,12 @@ function EnemyService.Iniciar()
 	EnemyService.CarpetaContenedora = carpeta :: Folder
 
 	-- Bucle centralizado de movimiento en el servidor (RunService.Heartbeat)
-	EnemyService.BucleConexion = RunService.Heartbeat:Connect(function(dt: number)
-		EnemyService.ActualizarMovimiento(dt)
-	end)
+	if not EnemyService.BucleConexion then
+		EnemyService.BucleConexion = RunService.Heartbeat:Connect(function(dt: number)
+			if not EnemyService.Activo then return end
+			EnemyService.ActualizarMovimiento(dt)
+		end)
+	end
 
 	print("[UMBRA Server] EnemyService iniciado (Sistema de Horda Ligero activo).")
 end
@@ -73,6 +81,8 @@ end
 
 -- Actualiza la posición de todos los enemigos hacia el jugador
 function EnemyService.ActualizarMovimiento(dt: number)
+	if not EnemyService.Activo then return end
+
 	for id, enemigo in EnemyService.EnemigosActivos do
 		if not enemigo.Part or not enemigo.Part.Parent then
 			EnemyService.EnemigosActivos[id] = nil
@@ -81,7 +91,6 @@ function EnemyService.ActualizarMovimiento(dt: number)
 
 		local objetivo = obtenerPosicionObjetivo(enemigo.Part.Position)
 		if objetivo then
-			-- Dirección horizontal pura (X-Z)
 			local posActual = enemigo.Part.Position
 			local direccion = Vector3.new(objetivo.X - posActual.X, 0, objetivo.Z - posActual.Z)
 			local distancia = direccion.Magnitude
@@ -89,10 +98,8 @@ function EnemyService.ActualizarMovimiento(dt: number)
 			if distancia > 1.5 then
 				local direccionNorm = direccion.Unit
 				local nuevaPos = posActual + (direccionNorm * enemigo.Velocidad * dt)
-				-- Mantener elevación fija sobre el suelo
 				enemigo.Part.CFrame = CFrame.new(nuevaPos, Vector3.new(objetivo.X, nuevaPos.Y, objetivo.Z))
 			else
-				-- El enemigo está en rango de golpear al jugador
 				EnemyService.AplicarDanioAJugador(enemigo)
 			end
 		end
@@ -101,6 +108,11 @@ end
 
 -- Spawnea un enemigo de tipo específico en una posición dada
 function EnemyService.CrearEnemigo(tipoId: string, posicion: Vector3, multiplicadorVida: number?): EnemigoInstancia?
+	-- Impedir generación si el servicio no está explícitamente activo
+	if not EnemyService.Activo then
+		return nil
+	end
+
 	local config = EnemigosConfig[tipoId]
 	if not config then return nil end
 
@@ -120,7 +132,6 @@ function EnemyService.CrearEnemigo(tipoId: string, posicion: Vector3, multiplica
 	part.CanQuery = true
 	part.CFrame = CFrame.new(posicion)
 
-	-- Efecto estético de sombra / resplandor
 	local highlight = Instance.new("Highlight")
 	highlight.FillColor = config.Color
 	highlight.OutlineColor = Color3.fromRGB(0, 0, 0)
@@ -129,7 +140,11 @@ function EnemyService.CrearEnemigo(tipoId: string, posicion: Vector3, multiplica
 	highlight.Adornee = part
 	highlight.Parent = part
 
-	part.Parent = EnemyService.CarpetaContenedora
+	if EnemyService.CarpetaContenedora then
+		part.Parent = EnemyService.CarpetaContenedora
+	else
+		part.Parent = Workspace
+	end
 
 	local instancia: EnemigoInstancia = {
 		Id = enemigoId,
@@ -149,12 +164,13 @@ end
 
 -- Aplica daño a un enemigo desde un ataque del jugador
 function EnemyService.DanioEnemigo(enemigoId: string, cantidad: number): boolean
+	if not EnemyService.Activo then return false end
+
 	local enemigo = EnemyService.EnemigosActivos[enemigoId]
 	if not enemigo then return false end
 
 	enemigo.VidaActual -= cantidad
 
-	-- Efecto visual breve de impacto
 	if enemigo.Part then
 		local origColor = enemigo.Part.Color
 		enemigo.Part.Color = Color3.fromRGB(255, 255, 255)
@@ -167,7 +183,7 @@ function EnemyService.DanioEnemigo(enemigoId: string, cantidad: number): boolean
 
 	if enemigo.VidaActual <= 0 then
 		EnemyService.EliminarEnemigo(enemigoId, true)
-		return true -- Murió
+		return true
 	end
 
 	return false
@@ -175,6 +191,8 @@ end
 
 -- Daño por contacto con el jugador
 function EnemyService.AplicarDanioAJugador(enemigo: EnemigoInstancia)
+	if not EnemyService.Activo then return end
+
 	for _, player in Players:GetPlayers() do
 		local character = player.Character
 		if character then
@@ -183,14 +201,14 @@ function EnemyService.AplicarDanioAJugador(enemigo: EnemigoInstancia)
 			if humanoid and root and humanoid.Health > 0 then
 				local dist = (root.Position - enemigo.Part.Position).Magnitude
 				if dist <= 3 then
-					humanoid:TakeDamage(enemigo.Danio * 0.05) -- Daño continuo leve
+					humanoid:TakeDamage(enemigo.Danio * 0.05)
 				end
 			end
 		end
 	end
 end
 
--- Destruye y desregistra a la entidad
+-- Destruye y desregistra a una entidad individual
 function EnemyService.EliminarEnemigo(enemigoId: string, generoDrop: boolean)
 	local enemigo = EnemyService.EnemigosActivos[enemigoId]
 	if not enemigo then return end
@@ -202,8 +220,37 @@ function EnemyService.EliminarEnemigo(enemigoId: string, generoDrop: boolean)
 	end
 end
 
+-- Limpia y destruye TODOS los enemigos activos inmediatamente
+function EnemyService.LimpiarTodos()
+	for id, enemigo in EnemyService.EnemigosActivos do
+		if enemigo.Part then
+			pcall(function() enemigo.Part:Destroy() end)
+		end
+	end
+	table.clear(EnemyService.EnemigosActivos)
+
+	if EnemyService.CarpetaContenedora then
+		EnemyService.CarpetaContenedora:ClearAllChildren()
+	end
+
+	print("[UMBRA Server] Todos los enemigos activos han sido eliminados de Workspace.")
+end
+
+-- Detiene por completo el servicio de enemigos
+function EnemyService.Detener()
+	EnemyService.Activo = false
+	if EnemyService.BucleConexion then
+		EnemyService.BucleConexion:Disconnect()
+		EnemyService.BucleConexion = nil
+	end
+	EnemyService.LimpiarTodos()
+	print("[UMBRA Server] EnemyService detenido por completo.")
+end
+
 function EnemyService.ObtenerEnemigosEnRadio(centro: Vector3, radio: number): { EnemigoInstancia }
 	local encontrados = {}
+	if not EnemyService.Activo then return encontrados end
+
 	for _, enemigo in EnemyService.EnemigosActivos do
 		if enemigo.Part and enemigo.Part.Parent then
 			local dist = (enemigo.Part.Position - centro).Magnitude

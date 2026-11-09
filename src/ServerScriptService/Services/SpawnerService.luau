@@ -1,6 +1,8 @@
 --!strict
 -- SpawnerService.luau
 -- Director de oleadas y generación perimetral de enemigos en UMBRA.
+-- Responsabilidad: Orquestar el ritmo de spawn durante la expedición y detenerse
+-- de forma inmediata e irreversible al finalizar la partida o al morir los jugadores.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -8,50 +10,81 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ConfigFolder = ReplicatedStorage:WaitForChild("Config")
 local OleadasConfig = require(ConfigFolder:WaitForChild("OleadasConfig") :: ModuleScript)
 
-local EnemyService = nil -- Inyectado al iniciar
+local EnemyService = nil :: any -- Inyectado al iniciar
+local GameManager = nil :: any -- Inyectado al iniciar o vincular
 
 local SpawnerService = {
 	Activo = false,
 	TiempoTranscurrido = 0,
 	HilosSpawner = {} :: { thread },
-	RadioMinimoSpawn = 22, -- Perímetro visible cercano
+	RadioMinimoSpawn = 22,
 	RadioMaximoSpawn = 42,
 	MaxEnemigosVivos = 200,
 }
 
-function SpawnerService.Iniciar(enemyServiceRef: any)
+function SpawnerService.VincularGameManager(gmRef: any)
+	GameManager = gmRef
+end
+
+function SpawnerService.Iniciar(enemyServiceRef: any, gmRef: any?)
+	-- Si ya está activo, detener previamente para evitar bucles duplicados
+	SpawnerService.Detener()
+
 	if enemyServiceRef then
 		EnemyService = enemyServiceRef
 	end
+	if gmRef then
+		GameManager = gmRef
+	end
+
 	SpawnerService.Activo = true
 	SpawnerService.TiempoTranscurrido = 0
 
 	print("[UMBRA Server] SpawnerService iniciado (Director de Oleadas activo).")
 
-	-- Hilo del reloj de oleadas
+	-- 1. Hilo del reloj de oleadas
 	local hiloReloj = task.spawn(function()
 		while SpawnerService.Activo do
 			task.wait(1)
+			if not SpawnerService.Activo then break end
 			SpawnerService.TiempoTranscurrido += 1
 		end
 	end)
 	table.insert(SpawnerService.HilosSpawner, hiloReloj)
 
-	-- Hilo principal de generación
+	-- 2. Hilo principal de generación
 	local hiloSpawn = task.spawn(function()
 		while SpawnerService.Activo do
+			-- Verificación estricta del estado de sesión: solo generar durante "Playing"
+			if GameManager and typeof(GameManager.ObtenerEstado) == "function" then
+				if GameManager.ObtenerEstado() ~= "Playing" then
+					task.wait(0.5)
+					continue
+				end
+			end
+
 			local fase = SpawnerService.ObtenerFaseActual()
 			local intervalo = 1 / math.max(fase.TasaSpawnPorSegundo, 0.5)
 
 			task.wait(intervalo)
+			if not SpawnerService.Activo then break end
 
-			local totalEnemigos = 0
-			for _ in EnemyService.EnemigosActivos do
-				totalEnemigos += 1
+			-- Re-verificación tras el yield de espera
+			if GameManager and typeof(GameManager.ObtenerEstado) == "function" then
+				if GameManager.ObtenerEstado() ~= "Playing" then
+					continue
+				end
 			end
 
-			if totalEnemigos < SpawnerService.MaxEnemigosVivos then
-				SpawnerService.GenerarEnemigoAleatorio(fase)
+			if EnemyService and EnemyService.EnemigosActivos then
+				local totalEnemigos = 0
+				for _ in EnemyService.EnemigosActivos do
+					totalEnemigos += 1
+				end
+
+				if totalEnemigos < SpawnerService.MaxEnemigosVivos then
+					SpawnerService.GenerarEnemigoAleatorio(fase)
+				end
 			end
 		end
 	end)
@@ -65,27 +98,34 @@ function SpawnerService.ObtenerFaseActual()
 			return fase
 		end
 	end
-	-- Si excede el tiempo configurado, retorna la última fase
 	return OleadasConfig[#OleadasConfig]
 end
 
 function SpawnerService.GenerarEnemigoAleatorio(fase: any)
+	-- Validación de seguridad
+	if not SpawnerService.Activo then return end
+	if not EnemyService or not EnemyService.Activo then return end
+
+	if GameManager and typeof(GameManager.ObtenerEstado) == "function" then
+		if GameManager.ObtenerEstado() ~= "Playing" then
+			return
+		end
+	end
+
 	local jugadores = Players:GetPlayers()
 	if #jugadores == 0 then return end
 
-	-- Seleccionar un jugador objetivo aleatorio
 	local jugadorTarget = jugadores[math.random(1, #jugadores)]
 	local character = jugadorTarget.Character
 	if not character then return end
 
 	local root = character:FindFirstChild("HumanoidRootPart") :: BasePart?
-	if not root then return end
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not root or not humanoid or humanoid.Health <= 0 then return end
 
-	-- Elegir tipo de enemigo de la lista permitida en la fase actual
 	local listaEnemigos = fase.EnemigosPermitidos
 	local tipoElegido = listaEnemigos[math.random(1, #listaEnemigos)]
 
-	-- Calcular posición en un anillo alrededor del jugador
 	local angulo = math.random() * math.pi * 2
 	local radio = math.random(SpawnerService.RadioMinimoSpawn, SpawnerService.RadioMaximoSpawn)
 
@@ -98,10 +138,17 @@ end
 
 function SpawnerService.Detener()
 	SpawnerService.Activo = false
+
 	for _, hilo in SpawnerService.HilosSpawner do
-		task.cancel(hilo)
+		pcall(function()
+			if hilo and hilo ~= coroutine.running() then
+				task.cancel(hilo)
+			end
+		end)
 	end
-	SpawnerService.HilosSpawner = {}
+	table.clear(SpawnerService.HilosSpawner)
+
+	print("[UMBRA Server] SpawnerService detenido. Generación de enemigos cancelada.")
 end
 
 return SpawnerService

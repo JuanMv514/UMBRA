@@ -13,6 +13,9 @@ end
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local ConfigFolder = ReplicatedStorage:WaitForChild("Config")
+local PlacesConfig = require(ConfigFolder:WaitForChild("PlacesConfig") :: ModuleScript)
+
 local localPlayer = Players.LocalPlayer
 local PlayerScripts = localPlayer:WaitForChild("PlayerScripts")
 local ControllersFolder = PlayerScripts:WaitForChild("Controllers")
@@ -22,7 +25,7 @@ local InputController = require(ControllersFolder:WaitForChild("InputController"
 local HUDController = require(ControllersFolder:WaitForChild("HUDController") :: ModuleScript)
 
 print("=========================================")
-print(string.format("[UMBRA Client] Iniciando sesión para: %s (ID: %d)", localPlayer.Name, localPlayer.UserId))
+print(string.format("[UMBRA Client] Iniciando sesión para: %s en %s", localPlayer.Name, if PlacesConfig.EsLobby() then "LOBBY" else "EXPEDICIÓN"))
 print("=========================================")
 
 local EstadoActual = "Waiting"
@@ -30,6 +33,11 @@ local EstadoActual = "Waiting"
 -- 2. Iniciar controladores del cliente
 HUDController.Iniciar()
 InputController.Iniciar()
+
+-- En el Lobby, asegurar cámara libre de tercera persona
+if PlacesConfig.EsLobby() then
+	CameraController.Detener()
+end
 
 -- 3. Escuchar cambios de estado autoritativos desde el Servidor
 local remotesFolder = ReplicatedStorage:WaitForChild("Remotes", 5)
@@ -43,11 +51,11 @@ if remotesFolder then
 
 			HUDController.ActualizarEstado(nuevoEstado)
 
-			if nuevoEstado == "Playing" then
+			if nuevoEstado == "Playing" and not PlacesConfig.EsLobby() then
 				CameraController.Iniciar()
 			elseif nuevoEstado == "GameOver" then
 				print("[UMBRA Client] Partida finalizada. Superviviente derrotado.")
-			elseif nuevoEstado == "Waiting" then
+			elseif nuevoEstado == "Waiting" or PlacesConfig.EsLobby() then
 				CameraController.Detener()
 			end
 		end)
@@ -61,8 +69,10 @@ local function alCargarPersonaje(character: Model)
 
 	if humanoid and root then
 		print(string.format("[UMBRA Client] Personaje de %s cargado correctamente en Workspace.", localPlayer.Name))
-		if EstadoActual == "Playing" then
+		if EstadoActual == "Playing" and not PlacesConfig.EsLobby() then
 			CameraController.Iniciar()
+		else
+			CameraController.Detener()
 		end
 	end
 end

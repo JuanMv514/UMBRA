@@ -1,21 +1,26 @@
 --!strict
 -- MatchmakingService.luau
--- Manejador autoritativo de emparejamiento, circulo magico y transporte a la arena de supervivencia.
+-- Manejador autoritativo de emparejamiento, círculo mágico y teletransporte a la expedición en UMBRA.
+-- Responsabilidad: Operar exclusivamente en el Lobby (Santuario), registrar participantes en el círculo,
+-- gestionar la cuenta regresiva de 15s y enviar al grupo al Place de Expedición mediante TeleportService.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local TeleportService = game:GetService("TeleportService")
 local Workspace = game:GetService("Workspace")
 
+local ConfigFolder = ReplicatedStorage:WaitForChild("Config")
+local PlacesConfig = require(ConfigFolder:WaitForChild("PlacesConfig") :: ModuleScript)
+
 local GameManager = nil :: any
-local SpawnerService = nil :: any
-local CombatService = nil :: any
 
 export type EstadoPortal = {
 	Total: number,
 	Maximo: number,
 	CuentaAtras: number,
 	CuentaActiva: boolean,
+	MensajeAlerta: string?,
 }
 
 local MatchmakingService = {
@@ -29,18 +34,16 @@ local MatchmakingService = {
 	BucleDeteccion = nil :: RBXScriptConnection?,
 	PosicionCirculo = Vector3.new(0, 0.5, -45),
 	RadioCirculo = 11,
-	PosicionArena = Vector3.new(0, 2, 60),
 	RemotePortal = nil :: RemoteEvent?,
 	BillboardGui = nil :: BillboardGui?,
 	TextoContador = nil :: TextLabel?,
 	TextoTiempo = nil :: TextLabel?,
 	PlataformaVisual = nil :: BasePart?,
+	TeletransporteEnProgreso = false,
 }
 
-function MatchmakingService.Iniciar(gameManagerRef: any, spawnerRef: any, combatRef: any)
+function MatchmakingService.Iniciar(gameManagerRef: any)
 	GameManager = gameManagerRef
-	SpawnerService = spawnerRef
-	CombatService = combatRef
 	MatchmakingService.Activo = true
 
 	-- Asegurar RemoteEvent en ReplicatedStorage.Remotes
@@ -55,15 +58,10 @@ function MatchmakingService.Iniciar(gameManagerRef: any, spawnerRef: any, combat
 		MatchmakingService.RemotePortal = remote
 	end
 
-	-- Construir plataforma fisica del circulo magico
+	-- Construir plataforma física del círculo mágico en el Lobby
 	MatchmakingService.ConstruirPlataformaFisica()
 
-	-- Spawner y combate inician en pausa hasta entrar a la arena
-	if SpawnerService and SpawnerService.Detener then
-		SpawnerService.Detener()
-	end
-
-	-- Bucle periodico de deteccion (0.2s)
+	-- Bucle periódico de detección de presencia de jugadores dentro del radio (0.2s)
 	local acumulador = 0
 	MatchmakingService.BucleDeteccion = RunService.Heartbeat:Connect(function(dt: number)
 		acumulador += dt
@@ -73,7 +71,7 @@ function MatchmakingService.Iniciar(gameManagerRef: any, spawnerRef: any, combat
 		end
 	end)
 
-	-- Manejar desconexion
+	-- Manejar desconexión de jugadores del círculo
 	Players.PlayerRemoving:Connect(function(player)
 		if MatchmakingService.Participantes[player] then
 			MatchmakingService.Participantes[player] = nil
@@ -81,7 +79,7 @@ function MatchmakingService.Iniciar(gameManagerRef: any, spawnerRef: any, combat
 		end
 	end)
 
-	print("[UMBRA Server] MatchmakingService iniciado con circulo magico de emparejamiento.")
+	print("[UMBRA Server] MatchmakingService iniciado en el Santuario (Lobby).")
 end
 
 function MatchmakingService.ConstruirPlataformaFisica()
@@ -92,7 +90,7 @@ function MatchmakingService.ConstruirPlataformaFisica()
 	contenedor.Name = "ZonaEmparejamiento"
 	contenedor.Parent = Workspace
 
-	-- Circulo base de piedra
+	-- Círculo base de piedra
 	local base = Instance.new("Part")
 	base.Name = "PlataformaCirculo"
 	base.Shape = Enum.PartType.Cylinder
@@ -105,7 +103,7 @@ function MatchmakingService.ConstruirPlataformaFisica()
 	base.Parent = contenedor
 	MatchmakingService.PlataformaVisual = base
 
-	-- Anillo de runas luminosas (Neon purpura)
+	-- Anillo de runas luminosas (Neon púrpura)
 	local anillo = Instance.new("Part")
 	anillo.Name = "AnilloMagico"
 	anillo.Shape = Enum.PartType.Cylinder
@@ -124,7 +122,7 @@ function MatchmakingService.ConstruirPlataformaFisica()
 	luz.Brightness = 2.0
 	luz.Parent = anillo
 
-	-- 4 Pads de espera individuales alrededor del circulo
+	-- 4 Pads de espera individuales alrededor del círculo
 	for i = 1, 4 do
 		local ang = (i - 1) * (math.pi * 2 / 4)
 		local px = MatchmakingService.PosicionCirculo.X + math.cos(ang) * 7.5
@@ -142,7 +140,7 @@ function MatchmakingService.ConstruirPlataformaFisica()
 		pad.Parent = contenedor
 	end
 
-	-- Cartel Holografico suspendido
+	-- Cartel Holográfico suspendido
 	local soporteHolo = Instance.new("Part")
 	soporteHolo.Name = "SoporteHolograma"
 	soporteHolo.Size = Vector3.new(1, 1, 1)
@@ -154,7 +152,7 @@ function MatchmakingService.ConstruirPlataformaFisica()
 
 	local billboard = Instance.new("BillboardGui")
 	billboard.Name = "BillboardEmparejamiento"
-	billboard.Size = UDim2.new(0, 320, 0, 100)
+	billboard.Size = UDim2.new(0, 340, 0, 100)
 	billboard.StudsOffset = Vector3.new(0, 2, 0)
 	billboard.AlwaysOnTop = true
 	billboard.MaxDistance = 100
@@ -186,7 +184,7 @@ function MatchmakingService.ConstruirPlataformaFisica()
 	titulo.TextColor3 = Color3.fromRGB(240, 220, 255)
 	titulo.Font = Enum.Font.GothamBlack
 	titulo.TextSize = 16
-	titulo.Text = "CIRCULO DE SUPERVIVENCIA"
+	titulo.Text = "PORTAL DE EXPEDICIÓN"
 	titulo.Parent = frame
 
 	local txtContador = Instance.new("TextLabel")
@@ -209,7 +207,7 @@ function MatchmakingService.ConstruirPlataformaFisica()
 	txtTiempo.TextColor3 = Color3.fromRGB(180, 160, 220)
 	txtTiempo.Font = Enum.Font.GothamBold
 	txtTiempo.TextSize = 13
-	txtTiempo.Text = "Pisa el circulo para unirte"
+	txtTiempo.Text = "Pisa el círculo para unirte"
 	txtTiempo.Parent = frame
 	MatchmakingService.TextoTiempo = txtTiempo
 end
@@ -233,12 +231,12 @@ function MatchmakingService.ActualizarDeteccion()
 					if totalActual < MatchmakingService.MaxJugadores then
 						MatchmakingService.Participantes[player] = true
 						huboCambio = true
-						print(string.format("[Matchmaking] %s entro al circulo magico.", player.Name))
+						print(string.format("[Matchmaking] %s entró al portal de expedición.", player.Name))
 					end
 				elseif not adentro and MatchmakingService.Participantes[player] then
 					MatchmakingService.Participantes[player] = nil
 					huboCambio = true
-					print(string.format("[Matchmaking] %s salio del circulo magico.", player.Name))
+					print(string.format("[Matchmaking] %s salió del portal de expedición.", player.Name))
 				end
 			end
 		else
@@ -265,11 +263,10 @@ end
 function MatchmakingService.OnParticipantesCambiados()
 	local total = MatchmakingService.ObtenerTotalParticipantes()
 
-	-- Manejar cuenta regresiva
 	if total == 0 then
 		MatchmakingService.CancelarCuentaAtras()
 	elseif total >= 4 then
-		-- Si se alcanza el maximo de 4, acelerar inicio inmediato o cuenta de 3s
+		-- Si se llena el cupo (4/4), acelerar inicio a 3 segundos
 		if not MatchmakingService.CuentaActiva or MatchmakingService.SegundosRestantes > 3 then
 			MatchmakingService.SegundosRestantes = 3
 			MatchmakingService.IniciarCuentaAtras()
@@ -308,7 +305,7 @@ function MatchmakingService.CancelarCuentaAtras()
 	MatchmakingService.HiloCuenta = nil
 	MatchmakingService.SegundosRestantes = MatchmakingService.TiempoCuentaAtras
 	MatchmakingService.NotificarEstado()
-	print("[Matchmaking] Circulo vacio. Cuenta regresiva cancelada.")
+	print("[Matchmaking] Portal vacío. Cuenta regresiva cancelada.")
 end
 
 function MatchmakingService.TransportarParticipantes()
@@ -328,38 +325,92 @@ function MatchmakingService.TransportarParticipantes()
 		return
 	end
 
-	print(string.format("[Matchmaking] ¡Partida confirmada! Transportando %d supervivientes a la Arena de Supervivencia...", #lista))
+	-- COMPROBACIÓN ESTRICTA DEL DESTINO:
+	-- No simular teletransportes en el mismo lugar ni inventar PlaceIds.
+	if PlacesConfig.ExpeditionPlaceId <= 0 or PlacesConfig.ExpeditionPlaceId == PlacesConfig.LobbyPlaceId then
+		warn("[Matchmaking] ==========================================================================")
+		warn("[Matchmaking] BLOQUEADO: El Place de Expedición todavía no está configurado.")
+		warn(string.format("[Matchmaking] PlaceId actual del Lobby: %d | ExpeditionPlaceId configurado: %d", PlacesConfig.LobbyPlaceId, PlacesConfig.ExpeditionPlaceId))
+		warn("[Matchmaking] Se requiere crear un segundo Place en la experiencia y registrar su PlaceId real en PlacesConfig.luau.")
+		warn("[Matchmaking] ==========================================================================")
 
-	-- 1. Transportar fisicamente a la arena de combate
-	for i, player in lista do
-		local character = player.Character
-		if character then
-			local root = character:FindFirstChild("HumanoidRootPart") :: BasePart?
-			if root then
-				local offset = Vector3.new((i - 1) * 4, 3, 0)
-				root.CFrame = CFrame.new(MatchmakingService.PosicionArena + offset)
-			end
+		MatchmakingService.MostrarAlerta(
+			"EXPEDICIÓN PENDIENTE (FALTA PLACE ID)",
+			"No se puede teletransportar: el Place de supervivencia no está configurado en PlacesConfig."
+		)
+		MatchmakingService.CancelarCuentaAtras()
+		return
+	end
+
+	-- Evitar ejecuciones duplicadas de teletransporte
+	if MatchmakingService.TeletransporteEnProgreso then
+		return
+	end
+	MatchmakingService.TeletransporteEnProgreso = true
+
+	print(string.format("[Matchmaking] Iniciando teletransporte de %d jugadores hacia el Place %d...", #lista, PlacesConfig.ExpeditionPlaceId))
+
+	-- Iniciar teletransporte autoritativo a un servidor reservado del Place de Expedición
+	task.spawn(function()
+		local exitoReserva, codigoAccesoOErr = pcall(function()
+			return TeleportService:ReserveServer(PlacesConfig.ExpeditionPlaceId)
+		end)
+
+		if not exitoReserva then
+			warn(string.format("[Matchmaking] Error al reservar servidor para Place %d: %s", PlacesConfig.ExpeditionPlaceId, tostring(codigoAccesoOErr)))
+			MatchmakingService.MostrarAlerta("ERROR DE RESERVA", "No fue posible crear el servidor de expedición.")
+			MatchmakingService.TeletransporteEnProgreso = false
+			MatchmakingService.CancelarCuentaAtras()
+			return
 		end
+
+		local options = Instance.new("TeleportOptions")
+		options.ReservedServerAccessCode = codigoAccesoOErr
+
+		local exitoTP, errTP = pcall(function()
+			TeleportService:TeleportAsync(PlacesConfig.ExpeditionPlaceId, lista, options)
+		end)
+
+		if not exitoTP then
+			warn(string.format("[Matchmaking] Error en TeleportService: %s", tostring(errTP)))
+			MatchmakingService.MostrarAlerta("FALLO DE TELETRANSPORTE", tostring(errTP))
+		else
+			print("[Matchmaking] Teletransporte enviado con éxito.")
+		end
+
+		table.clear(MatchmakingService.Participantes)
+		MatchmakingService.TeletransporteEnProgreso = false
+		MatchmakingService.NotificarEstado()
+	end)
+end
+
+function MatchmakingService.MostrarAlerta(textoHolo: string, mensajeClient: string)
+	if MatchmakingService.TextoTiempo then
+		MatchmakingService.TextoTiempo.Text = textoHolo
+		MatchmakingService.TextoTiempo.TextColor3 = Color3.fromRGB(255, 70, 70)
 	end
 
-	-- 2. Limpiar participantes del portal para futuras partidas
-	table.clear(MatchmakingService.Participantes)
-	MatchmakingService.NotificarEstado()
-
-	-- 3. Iniciar sistemas de supervivencia autoritativos en GameManager, Spawner y Combate
-	if GameManager and GameManager.CambiarEstado then
-		GameManager.CambiarEstado("Playing")
+	if MatchmakingService.RemotePortal then
+		MatchmakingService.RemotePortal:FireAllClients({
+			Total = MatchmakingService.ObtenerTotalParticipantes(),
+			Maximo = MatchmakingService.MaxJugadores,
+			CuentaAtras = MatchmakingService.SegundosRestantes,
+			CuentaActiva = false,
+			MensajeAlerta = mensajeClient,
+		})
 	end
 
-	if SpawnerService and SpawnerService.Iniciar then
-		SpawnerService.Iniciar(nil)
-	end
+	task.delay(5, function()
+		if not MatchmakingService.CuentaActiva and MatchmakingService.TextoTiempo then
+			MatchmakingService.TextoTiempo.Text = "Pisa el círculo para unirte"
+			MatchmakingService.TextoTiempo.TextColor3 = Color3.fromRGB(180, 160, 220)
+		end
+	end)
 end
 
 function MatchmakingService.NotificarEstado()
 	local total = MatchmakingService.ObtenerTotalParticipantes()
 
-	-- Actualizar cartel holografico
 	if MatchmakingService.TextoContador then
 		MatchmakingService.TextoContador.Text = string.format("JUGADORES: %d / %d", total, MatchmakingService.MaxJugadores)
 		if total == 4 then
@@ -374,18 +425,18 @@ function MatchmakingService.NotificarEstado()
 			MatchmakingService.TextoTiempo.Text = string.format("INICIANDO EN %d SEGUNDOS...", MatchmakingService.SegundosRestantes)
 			MatchmakingService.TextoTiempo.TextColor3 = Color3.fromRGB(255, 220, 80)
 		else
-			MatchmakingService.TextoTiempo.Text = "Pisa el circulo para unirte"
+			MatchmakingService.TextoTiempo.Text = "Pisa el círculo para unirte"
 			MatchmakingService.TextoTiempo.TextColor3 = Color3.fromRGB(180, 160, 220)
 		end
 	end
 
-	-- Sincronizar hacia los clientes
 	if MatchmakingService.RemotePortal then
 		MatchmakingService.RemotePortal:FireAllClients({
 			Total = total,
 			Maximo = MatchmakingService.MaxJugadores,
 			CuentaAtras = MatchmakingService.SegundosRestantes,
 			CuentaActiva = MatchmakingService.CuentaActiva,
+			MensajeAlerta = nil,
 		})
 	end
 end

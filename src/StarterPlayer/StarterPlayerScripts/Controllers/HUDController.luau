@@ -1,13 +1,17 @@
 --!strict
 -- HUDController.luau
 -- Interfaz gráfica en pantalla (HUD) para UMBRA: La última luz.
--- Responsabilidad: Visualizar barra de vida, estado de sesión, reloj de supervivencia,
--- banner de emparejamiento y pantalla modal de derrota (Game Over) con tiempo exacto congelado.
+-- Responsabilidad: Reconocer autoritativamente si el jugador se encuentra en el Lobby o en la Expedición.
+-- En el Lobby: oculta barra de vida y temporizador; muestra únicamente emparejamiento.
+-- En la Expedición: muestra salud, temporizador de supervivencia activo y pantalla modal de derrota con reloj congelado.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
+
+local ConfigFolder = ReplicatedStorage:WaitForChild("Config")
+local PlacesConfig = require(ConfigFolder:WaitForChild("PlacesConfig") :: ModuleScript)
 
 local localPlayer = Players.LocalPlayer
 local PlayerGui = localPlayer:WaitForChild("PlayerGui") :: PlayerGui
@@ -17,6 +21,7 @@ local HUDController = {
 	ScreenGui = nil :: ScreenGui?,
 	BarraVida = nil :: Frame?,
 	TextoVida = nil :: TextLabel?,
+	ContenedorVida = nil :: Frame?,
 	TextoEstado = nil :: TextLabel?,
 	TextoReloj = nil :: TextLabel?,
 	BannerSuperior = nil :: Frame?,
@@ -25,6 +30,7 @@ local HUDController = {
 	ModalGameOver = nil :: Frame?,
 	OverlayFondo = nil :: Frame?,
 	TextoTiempoFinal = nil :: TextLabel?,
+	NotaReaparicion = nil :: TextLabel?,
 	TiempoInicio = 0,
 	TiempoFinalCongelado = 0,
 	RelojCongelado = false,
@@ -35,6 +41,8 @@ function HUDController.Iniciar()
 	if HUDController.Activo then return end
 	HUDController.Activo = true
 
+	local esLobby = PlacesConfig.EsLobby()
+
 	-- 1. Crear ScreenGui principal
 	local gui = Instance.new("ScreenGui")
 	gui.Name = "UmbraHUD"
@@ -43,7 +51,7 @@ function HUDController.Iniciar()
 	gui.Parent = PlayerGui
 	HUDController.ScreenGui = gui
 
-	-- 2. Banner superior: Reloj y Estado
+	-- 2. Banner superior: Reloj y Estado (SOLO para Expedición)
 	local bannerSuperior = Instance.new("Frame")
 	bannerSuperior.Name = "BannerSuperior"
 	bannerSuperior.Size = UDim2.new(0, 300, 0, 52)
@@ -51,6 +59,7 @@ function HUDController.Iniciar()
 	bannerSuperior.BackgroundColor3 = Color3.fromRGB(15, 12, 22)
 	bannerSuperior.BackgroundTransparency = 0.25
 	bannerSuperior.BorderSizePixel = 0
+	bannerSuperior.Visible = not esLobby -- Oculto en el Lobby
 	bannerSuperior.Parent = gui
 	HUDController.BannerSuperior = bannerSuperior
 
@@ -71,7 +80,7 @@ function HUDController.Iniciar()
 	textoEstado.TextColor3 = Color3.fromRGB(200, 180, 255)
 	textoEstado.Font = Enum.Font.GothamBold
 	textoEstado.TextSize = 13
-	textoEstado.Text = "SANTUARIO (LOBBY)"
+	textoEstado.Text = if esLobby then "SANTUARIO" else "PREPARANDO EXPEDICIÓN"
 	textoEstado.Parent = bannerSuperior
 	HUDController.TextoEstado = textoEstado
 
@@ -87,13 +96,13 @@ function HUDController.Iniciar()
 	textoReloj.Parent = bannerSuperior
 	HUDController.TextoReloj = textoReloj
 
-	-- 3. Banner de Matchmaking en pantalla (abajo del banner superior)
+	-- 3. Banner de Matchmaking en pantalla (para el Lobby)
 	local bannerMM = Instance.new("Frame")
 	bannerMM.Name = "BannerMatchmaking"
-	bannerMM.Size = UDim2.new(0, 360, 0, 36)
-	bannerMM.Position = UDim2.new(0.5, -180, 0, 76)
+	bannerMM.Size = UDim2.new(0, 420, 0, 40)
+	bannerMM.Position = UDim2.new(0.5, -210, 0, 20)
 	bannerMM.BackgroundColor3 = Color3.fromRGB(20, 15, 30)
-	bannerMM.BackgroundTransparency = 0.3
+	bannerMM.BackgroundTransparency = 0.25
 	bannerMM.BorderSizePixel = 0
 	bannerMM.Visible = false
 	bannerMM.Parent = gui
@@ -115,11 +124,11 @@ function HUDController.Iniciar()
 	textoMM.TextColor3 = Color3.fromRGB(220, 245, 255)
 	textoMM.Font = Enum.Font.GothamBold
 	textoMM.TextSize = 13
-	textoMM.Text = "EMPAREJAMIENTO EN CURSO..."
+	textoMM.Text = "EXPEDICIÓN EN PREPARACIÓN"
 	textoMM.Parent = bannerMM
 	HUDController.TextoMatchmaking = textoMM
 
-	-- 4. Barra inferior: Salud del superviviente
+	-- 4. Barra inferior: Salud del superviviente (SOLO para Expedición)
 	local contenedorVida = Instance.new("Frame")
 	contenedorVida.Name = "ContenedorVida"
 	contenedorVida.Size = UDim2.new(0, 320, 0, 26)
@@ -127,7 +136,9 @@ function HUDController.Iniciar()
 	contenedorVida.BackgroundColor3 = Color3.fromRGB(20, 15, 25)
 	contenedorVida.BackgroundTransparency = 0.2
 	contenedorVida.BorderSizePixel = 0
+	contenedorVida.Visible = not esLobby -- Oculto en el Lobby
 	contenedorVida.Parent = gui
+	HUDController.ContenedorVida = contenedorVida
 
 	local cornerContenedor = Instance.new("UICorner")
 	cornerContenedor.CornerRadius = UDim.new(0, 8)
@@ -175,8 +186,8 @@ function HUDController.Iniciar()
 
 	local modal = Instance.new("Frame")
 	modal.Name = "ModalGameOver"
-	modal.Size = UDim2.new(0, 440, 0, 270)
-	modal.Position = UDim2.new(0.5, -220, 0.5, -135)
+	modal.Size = UDim2.new(0, 460, 0, 280)
+	modal.Position = UDim2.new(0.5, -230, 0.5, -140)
 	modal.BackgroundColor3 = Color3.fromRGB(18, 12, 26)
 	modal.BackgroundTransparency = 0.15
 	modal.BorderSizePixel = 0
@@ -215,15 +226,14 @@ function HUDController.Iniciar()
 	subtituloGO.Font = Enum.Font.GothamMedium
 	subtituloGO.TextSize = 13
 	subtituloGO.TextWrapped = true
-	subtituloGO.Text = "El Vacío ha consumido tu último resplandor. Tu alma regresará al Santuario."
+	subtituloGO.Text = "El Vacío ha consumido tu último resplandor. La expedición ha terminado."
 	subtituloGO.ZIndex = 52
 	subtituloGO.Parent = modal
 
-	-- Contenedor del Tiempo Sobrevivido
 	local boxTiempo = Instance.new("Frame")
 	boxTiempo.Name = "BoxTiempo"
-	boxTiempo.Size = UDim2.new(0, 360, 0, 76)
-	boxTiempo.Position = UDim2.new(0.5, -180, 0, 98)
+	boxTiempo.Size = UDim2.new(0, 380, 0, 76)
+	boxTiempo.Position = UDim2.new(0.5, -190, 0, 98)
 	boxTiempo.BackgroundColor3 = Color3.fromRGB(12, 8, 18)
 	boxTiempo.BackgroundTransparency = 0.3
 	boxTiempo.BorderSizePixel = 0
@@ -267,14 +277,15 @@ function HUDController.Iniciar()
 	local notaReaparicion = Instance.new("TextLabel")
 	notaReaparicion.Name = "NotaReaparicion"
 	notaReaparicion.Size = UDim2.new(1, 0, 0, 26)
-	notaReaparicion.Position = UDim2.new(0, 0, 0, 190)
+	notaReaparicion.Position = UDim2.new(0, 0, 0, 192)
 	notaReaparicion.BackgroundTransparency = 1
-	notaReaparicion.TextColor3 = Color3.fromRGB(150, 140, 170)
+	notaReaparicion.TextColor3 = Color3.fromRGB(160, 150, 180)
 	notaReaparicion.Font = Enum.Font.Gotham
 	notaReaparicion.TextSize = 12
-	notaReaparicion.Text = "Reapareciendo en el Santuario..."
+	notaReaparicion.Text = "Retornando al Santuario..."
 	notaReaparicion.ZIndex = 52
 	notaReaparicion.Parent = modal
+	HUDController.NotaReaparicion = notaReaparicion
 
 	-- 6. Conectar vida y detección de muerte del personaje
 	local function vincularSalud(character: Model)
@@ -282,6 +293,8 @@ function HUDController.Iniciar()
 		if not humanoid then return end
 
 		local function actualizar()
+			if PlacesConfig.EsLobby() then return end
+
 			local maxH = math.max(humanoid.MaxHealth, 1)
 			local ratio = math.clamp(humanoid.Health / maxH, 0, 1)
 			if HUDController.BarraVida then
@@ -297,9 +310,10 @@ function HUDController.Iniciar()
 		actualizar()
 		humanoid.HealthChanged:Connect(actualizar)
 
-		-- Al morir, parar el reloj inmediatamente y mostrar ventana de derrota
 		humanoid.Died:Connect(function()
-			HUDController.DispararDerrota()
+			if not PlacesConfig.EsLobby() then
+				HUDController.DispararDerrota()
+			end
 		end)
 	end
 
@@ -307,24 +321,26 @@ function HUDController.Iniciar()
 		vincularSalud(localPlayer.Character)
 	end
 	localPlayer.CharacterAdded:Connect(function(char)
-		-- Si reaparece tras morir, restablecer modal si corresponde
 		task.wait(0.5)
 		vincularSalud(char)
 	end)
 
-	-- 7. Bucle de reloj de supervivencia (se congela instantáneamente al morir)
-	HUDController.TiempoInicio = os.clock()
-	HUDController.ConexionReloj = RunService.RenderStepped:Connect(function()
-		if not HUDController.Activo or not HUDController.TextoReloj then return end
-		if HUDController.RelojCongelado then return end -- Congelado al morir
+	-- 7. Bucle de reloj de supervivencia: SOLO se activa en la Expedición durante "Playing"
+	-- En el Lobby no se conecta ningún cronómetro ascendente.
+	if not esLobby then
+		HUDController.ConexionReloj = RunService.RenderStepped:Connect(function()
+			if not HUDController.Activo or not HUDController.TextoReloj then return end
+			if HUDController.RelojCongelado then return end
+			if HUDController.TiempoInicio <= 0 then return end
 
-		local diff = math.max(0, math.floor(os.clock() - HUDController.TiempoInicio))
-		local mins = math.floor(diff / 60)
-		local secs = diff % 60
-		HUDController.TextoReloj.Text = string.format("%02d:%02d", mins, secs)
-	end)
+			local diff = math.max(0, math.floor(os.clock() - HUDController.TiempoInicio))
+			local mins = math.floor(diff / 60)
+			local secs = diff % 60
+			HUDController.TextoReloj.Text = string.format("%02d:%02d", mins, secs)
+		end)
+	end
 
-	-- 8. Escuchar eventos de emparejamiento desde el servidor
+	-- 8. Escuchar eventos de emparejamiento desde el servidor (Lobby)
 	task.spawn(function()
 		local remotesFolder = ReplicatedStorage:WaitForChild("Remotes", 10)
 		if remotesFolder then
@@ -337,16 +353,19 @@ function HUDController.Iniciar()
 		end
 	end)
 
-	print("[UMBRA Client] HUDController iniciado con modal de Game Over y congelamiento de tiempo.")
+	print(string.format("[UMBRA Client] HUDController iniciado con éxito (Modo: %s).", if esLobby then "Lobby" else "Expedición"))
 end
 
 function HUDController.DispararDerrota()
 	if HUDController.RelojCongelado then return end
 	HUDController.RelojCongelado = true
 
-	-- Congelar tiempo exacto al milisegundo de muerte
-	local tiempoTotal = math.max(0, math.floor(os.clock() - HUDController.TiempoInicio))
+	local tiempoTotal = 0
+	if HUDController.TiempoInicio > 0 then
+		tiempoTotal = math.max(0, math.floor(os.clock() - HUDController.TiempoInicio))
+	end
 	HUDController.TiempoFinalCongelado = tiempoTotal
+
 	local mins = math.floor(tiempoTotal / 60)
 	local secs = tiempoTotal % 60
 	local formatoTiempo = string.format("%02d:%02d", mins, secs)
@@ -361,11 +380,14 @@ function HUDController.DispararDerrota()
 	end
 
 	if HUDController.TextoEstado then
-		HUDController.TextoEstado.Text = "HAS CAÍDO EN LA OSCURIDAD"
+		HUDController.TextoEstado.Text = "EXPEDICIÓN FALLIDA"
 		HUDController.TextoEstado.TextColor3 = Color3.fromRGB(255, 60, 60)
 	end
 
-	-- Animación de apertura de la ventana de derrota
+	if HUDController.NotaReaparicion then
+		HUDController.NotaReaparicion.Text = "Retornando al Santuario..."
+	end
+
 	if HUDController.OverlayFondo and HUDController.ModalGameOver then
 		HUDController.OverlayFondo.Visible = true
 		HUDController.ModalGameOver.Visible = true
@@ -374,9 +396,9 @@ function HUDController.DispararDerrota()
 			BackgroundTransparency = 0.4
 		}):Play()
 
-		HUDController.ModalGameOver.Position = UDim2.new(0.5, -220, 0.45, -135)
+		HUDController.ModalGameOver.Position = UDim2.new(0.5, -230, 0.45, -140)
 		TweenService:Create(HUDController.ModalGameOver, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
-			Position = UDim2.new(0.5, -220, 0.5, -135)
+			Position = UDim2.new(0.5, -230, 0.5, -140)
 		}):Play()
 	end
 end
@@ -398,6 +420,19 @@ function HUDController.ActualizarMatchmaking(datos: any)
 	if not HUDController.BannerMatchmaking or not HUDController.TextoMatchmaking then return end
 	if not datos or typeof(datos) ~= "table" then return end
 
+	-- Si hay un mensaje de alerta (ej: PlaceId no configurado)
+	if datos.MensajeAlerta then
+		HUDController.BannerMatchmaking.Visible = true
+		HUDController.TextoMatchmaking.Text = tostring(datos.MensajeAlerta)
+		HUDController.TextoMatchmaking.TextColor3 = Color3.fromRGB(255, 80, 80)
+		task.delay(6, function()
+			if HUDController.BannerMatchmaking and not datos.CuentaActiva then
+				HUDController.BannerMatchmaking.Visible = false
+			end
+		end)
+		return
+	end
+
 	local total = datos.Total or 0
 	local maximo = datos.Maximo or 4
 	local cuentaActiva = datos.CuentaActiva or false
@@ -406,10 +441,10 @@ function HUDController.ActualizarMatchmaking(datos: any)
 	if total > 0 then
 		HUDController.BannerMatchmaking.Visible = true
 		if cuentaActiva then
-			HUDController.TextoMatchmaking.Text = string.format("EXPEDICIÓN (%d/%d) — INICIANDO EN %d SEG", total, maximo, cuentaAtras)
+			HUDController.TextoMatchmaking.Text = string.format("PORTAL EXPEDICIÓN (%d/%d) — TELETRANSPORTE EN %d SEG", total, maximo, cuentaAtras)
 			HUDController.TextoMatchmaking.TextColor3 = Color3.fromRGB(255, 225, 90)
 		else
-			HUDController.TextoMatchmaking.Text = string.format("EXPEDICIÓN (%d/%d) — ESPERANDO GRUPO...", total, maximo)
+			HUDController.TextoMatchmaking.Text = string.format("PORTAL EXPEDICIÓN (%d/%d) — ESPERANDO GRUPO...", total, maximo)
 			HUDController.TextoMatchmaking.TextColor3 = Color3.fromRGB(100, 240, 255)
 		end
 	else
@@ -418,27 +453,44 @@ function HUDController.ActualizarMatchmaking(datos: any)
 end
 
 function HUDController.ActualizarEstado(nuevoEstado: string)
+	local esLobby = PlacesConfig.EsLobby()
+
+	-- En el Lobby, todos los elementos de combate y reloj permanecen ocultos
+	if esLobby then
+		if HUDController.BannerSuperior then HUDController.BannerSuperior.Visible = false end
+		if HUDController.ContenedorVida then HUDController.ContenedorVida.Visible = false end
+		if HUDController.ModalGameOver then HUDController.ModalGameOver.Visible = false end
+		return
+	end
+
+	-- En la Expedición:
 	if not HUDController.TextoEstado then return end
 
-	if nuevoEstado == "Waiting" then
-		HUDController.TextoEstado.Text = "SANTUARIO (LOBBY)"
-		HUDController.TextoEstado.TextColor3 = Color3.fromRGB(180, 180, 210)
-		HUDController.OcultarDerrota()
-	elseif nuevoEstado == "Starting" then
-		HUDController.TextoEstado.Text = "PREPARANDO SUPERVIVENCIA"
+	if nuevoEstado == "Waiting" or nuevoEstado == "Starting" then
+		HUDController.TextoEstado.Text = "PREPARANDO EXPEDICIÓN"
 		HUDController.TextoEstado.TextColor3 = Color3.fromRGB(240, 200, 80)
 		HUDController.OcultarDerrota()
+		if HUDController.BannerSuperior then HUDController.BannerSuperior.Visible = true end
+		if HUDController.ContenedorVida then HUDController.ContenedorVida.Visible = true end
+
 	elseif nuevoEstado == "Playing" then
 		HUDController.TextoEstado.Text = "SUPERVIVENCIA EN CURSO"
 		HUDController.TextoEstado.TextColor3 = Color3.fromRGB(100, 240, 140)
 		HUDController.OcultarDerrota()
 		HUDController.TiempoInicio = os.clock()
 		HUDController.RelojCongelado = false
-		if HUDController.BannerMatchmaking then
-			HUDController.BannerMatchmaking.Visible = false
-		end
+		if HUDController.BannerSuperior then HUDController.BannerSuperior.Visible = true end
+		if HUDController.ContenedorVida then HUDController.ContenedorVida.Visible = true end
+		if HUDController.BannerMatchmaking then HUDController.BannerMatchmaking.Visible = false end
+
 	elseif nuevoEstado == "GameOver" then
 		HUDController.DispararDerrota()
+
+	elseif nuevoEstado == "ReturningToLobby" then
+		if HUDController.NotaReaparicion then
+			HUDController.NotaReaparicion.Text = "Teletransportando al Santuario (Lobby)..."
+			HUDController.NotaReaparicion.TextColor3 = Color3.fromRGB(80, 220, 255)
+		end
 	end
 end
 

@@ -316,4 +316,25 @@ function CombatService.AsegurarOrbitales(player: Player, root: BasePart, habilid
 	end
 end
 
+-- Detiene por completo el sistema de combate y limpia efectos
+function CombatService.Detener()
+	CombatService.Activo = false
+
+	if CombatService.BucleConexion then
+		CombatService.BucleConexion:Disconnect()
+		CombatService.BucleConexion = nil
+	end
+
+	for player, _ in CombatService.Perfiles do
+		CombatService.DesregistrarJugador(player)
+	end
+	table.clear(CombatService.Perfiles)
+
+	if CombatService.CarpetaEfectos then
+		CombatService.CarpetaEfectos:ClearAllChildren()
+	end
+
+	print("[UMBRA Server] CombatService detenido por completo.")
+end
+
 return CombatService
