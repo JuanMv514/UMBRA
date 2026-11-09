@@ -1,42 +1,67 @@
 --!strict
 -- ServerMain.server.luau
--- Punto de entrada único del Servidor (Server Bootstrap) para UMBRA.
+-- Punto de entrada único del Servidor (Server Bootstrap) para UMBRA: La última luz.
+-- Responsabilidad: Orquestar la inicialización secuencial de servicios y captura de errores.
 
 local Players = game:GetService("Players")
 local ServerScriptService = game:GetService("ServerScriptService")
 
+print("=========================================")
+print("      UMBRA — SERVIDOR INICIANDO         ")
+print("=========================================")
+
 local ServicesFolder = ServerScriptService:WaitForChild("Services")
-local GameManager = require(ServicesFolder:WaitForChild("GameManager") :: ModuleScript)
-local EnemyService = require(ServicesFolder:WaitForChild("EnemyService") :: ModuleScript)
-local SpawnerService = require(ServicesFolder:WaitForChild("SpawnerService") :: ModuleScript)
-local CombatService = require(ServicesFolder:WaitForChild("CombatService") :: ModuleScript)
 
-print("=========================================")
-print("        UMBRA - SERVIDOR INICIADO        ")
-print("=========================================")
+-- Función protegida de inicialización de servicios
+local function inicializarServicio(nombre: string, modulo: ModuleScript): (boolean, any)
+	local exitoCarga, servicio = pcall(require, modulo)
+	if not exitoCarga then
+		warn(string.format("[ServerMain] ERROR CRÍTICO al cargar el módulo '%s': %s", nombre, tostring(servicio)))
+		return false, nil
+	end
 
--- 1. Inicializar GameManager
-GameManager.Iniciar()
+	if typeof(servicio) == "table" and typeof(servicio.Iniciar) == "function" then
+		local exitoInit, err = pcall(servicio.Iniciar)
+		if not exitoInit then
+			warn(string.format("[ServerMain] ERROR CRÍTICO al ejecutar Iniciar() en '%s': %s", nombre, tostring(err)))
+			return false, servicio
+		end
+	end
 
--- 2. Inicializar subsistemas de horda y combate
-EnemyService.Iniciar()
-SpawnerService.Iniciar(EnemyService)
-CombatService.Iniciar(EnemyService)
-
--- 3. Gestión de ciclo de vida de jugadores
-local function onPlayerAdded(player: Player)
-	GameManager.OnPlayerAdded(player)
-	CombatService.RegistrarJugador(player)
+	print(string.format("[ServerMain] Servicio '%s' inicializado con éxito.", nombre))
+	return true, servicio
 end
 
-local function onPlayerRemoving(player: Player)
-	CombatService.DesregistrarJugador(player)
-	GameManager.OnPlayerRemoving(player)
+-- 1. Inicialización ordenada del GameManager
+local gmModulo = ServicesFolder:WaitForChild("GameManager") :: ModuleScript
+local exitoGM, GameManager = inicializarServicio("GameManager", gmModulo)
+
+if not exitoGM or not GameManager then
+	error("[ServerMain] No fue posible inicializar GameManager. Deteniendo arranque del servidor.")
 end
 
-Players.PlayerAdded:Connect(onPlayerAdded)
-Players.PlayerRemoving:Connect(onPlayerRemoving)
+-- 2. Registro protegido del ciclo de vida de jugadores
+local function registrarJugador(player: Player)
+	local exito, err = pcall(GameManager.OnPlayerAdded, player)
+	if not exito then
+		warn(string.format("[ServerMain] Error al registrar PlayerAdded para %s: %s", player.Name, tostring(err)))
+	end
+end
+
+local function desregistrarJugador(player: Player)
+	local exito, err = pcall(GameManager.OnPlayerRemoving, player)
+	if not exito then
+		warn(string.format("[ServerMain] Error al registrar PlayerRemoving para %s: %s", player.Name, tostring(err)))
+	end
+end
+
+Players.PlayerAdded:Connect(registrarJugador)
+Players.PlayerRemoving:Connect(desregistrarJugador)
 
 for _, player in Players:GetPlayers() do
-	task.spawn(onPlayerAdded, player)
+	task.spawn(registrarJugador, player)
 end
+
+print("=========================================")
+print("     UMBRA — SERVIDOR LISTO Y ACTIVO     ")
+print("=========================================")
