@@ -7,19 +7,14 @@ local PlacesConfig = {
 	-- PLACE 1: Santuario / Lobby principal (identificador verificado del Place actual)
 	LobbyPlaceId = 82280448337693,
 
-	-- PLACE 2: Arena de Expedición / Supervivencia
-	-- NOTA TÉCNICA: Actualmente la experiencia UMBRA (UniverseId: 10775489451) solo cuenta con
-	-- un (1) Place creado: el Lobby (82280448337693).
-	-- Cuando se cree el segundo Place desde Roblox Studio (Asset Manager > Places > Add Place),
-	-- se debe asignar aquí su PlaceId numérico real (ej: 1234567890).
-	ExpeditionPlaceId = 0,
+	-- PLACE 2: Arena de Expedición / Supervivencia (identificador oficial verificado)
+	ExpeditionPlaceId = 100031865578609,
 }
 
 -- Determina si el entorno actual de ejecución es el Lobby principal
 function PlacesConfig.EsLobby(): boolean
 	local currentId = game.PlaceId
-	-- Si coincide con el LobbyPlaceId o si no existe un Place de expedición configurado
-	if currentId == PlacesConfig.LobbyPlaceId or PlacesConfig.ExpeditionPlaceId <= 0 then
+	if currentId == PlacesConfig.LobbyPlaceId then
 		return true
 	end
 	return currentId ~= PlacesConfig.ExpeditionPlaceId
