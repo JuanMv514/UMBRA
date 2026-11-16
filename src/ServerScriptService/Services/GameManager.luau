@@ -12,6 +12,8 @@ local ConfigFolder = ReplicatedStorage:WaitForChild("Config")
 local PlacesConfig = require(ConfigFolder:WaitForChild("PlacesConfig") :: ModuleScript)
 
 export type EstadoPartida = "Waiting" | "Starting" | "Playing" | "GameOver" | "ReturningToLobby"
+export type EstadoJugador = "Alive" | "Dead" | "Spectating" | "ReturningToLobby" | "Returned"
+export type ModoExpedicion = "Solo" | "Coop"
 
 local TRANSICIONES_VALIDAS: { [EstadoPartida]: { [EstadoPartida]: boolean } } = {
 	Waiting = { Starting = true, Playing = true },
@@ -23,11 +25,20 @@ local TRANSICIONES_VALIDAS: { [EstadoPartida]: { [EstadoPartida]: boolean } } = 
 
 local GameManager = {
 	EstadoActual = "Waiting" :: EstadoPartida,
+	ModoExpedicion = "Solo" :: ModoExpedicion, -- Inmutable una vez comenzada la expedición
 	JugadoresConectados = {} :: { [Player]: boolean },
 	JugadoresVivos = {} :: { [Player]: boolean },
+	EstadosJugadores = {} :: { [Player]: EstadoJugador },
 	ConexionesPersonajes = {} :: { [Player]: { RBXScriptConnection } },
 	TransicionEnProgreso = false,
+	RetornoEnProgreso = false,
+	IntentosRetorno = 0,
+	MaxIntentosRetorno = 2,
+	ConexionTeleportInitFailed = nil :: RBXScriptConnection?,
 	RemoteSincronizar = nil :: RemoteEvent?,
+	RemoteEstadoIndividual = nil :: RemoteEvent?,
+	RemoteSolicitarRetorno = nil :: RemoteEvent?,
+	RemoteSupervivientes = nil :: RemoteEvent?,
 	SpawnerService = nil :: any,
 	EnemyService = nil :: any,
 	CombatService = nil :: any,
@@ -42,18 +53,46 @@ end
 
 -- Inicializa el servicio y localiza canales de comunicación
 function GameManager.Iniciar()
-	local remotesFolder = ReplicatedStorage:WaitForChild("Remotes", 5)
-	if remotesFolder then
-		local remote = remotesFolder:WaitForChild("SincronizarEstadoPartida", 5) :: RemoteEvent?
-		if remote and remote:IsA("RemoteEvent") then
-			GameManager.RemoteSincronizar = remote
-		else
-			warn("[GameManager] Advertencia: No se encontró el RemoteEvent 'SincronizarEstadoPartida'.")
-		end
+	local remotesFolder = ReplicatedStorage:FindFirstChild("Remotes")
+	if not remotesFolder then
+		remotesFolder = Instance.new("Folder")
+		remotesFolder.Name = "Remotes"
+		remotesFolder.Parent = ReplicatedStorage
 	end
+
+	local function asegurarRemote(nombre: string): RemoteEvent
+		local r = remotesFolder:FindFirstChild(nombre) :: RemoteEvent?
+		if not r or not r:IsA("RemoteEvent") then
+			r = Instance.new("RemoteEvent")
+			r.Name = nombre
+			r.Parent = remotesFolder
+		end
+		return r
+	end
+
+	GameManager.RemoteSincronizar = asegurarRemote("SincronizarEstadoPartida")
+	GameManager.RemoteEstadoIndividual = asegurarRemote("SincronizarEstadoIndividual")
+	GameManager.RemoteSolicitarRetorno = asegurarRemote("SolicitarRetornoIndividual")
+	GameManager.RemoteSupervivientes = asegurarRemote("ActualizarSupervivientes")
+
+	-- Escuchar solicitudes autoritativas de retorno individual desde el cliente
+	GameManager.RemoteSolicitarRetorno.OnServerEvent:Connect(function(player: Player)
+		GameManager.SolicitarRetornoIndividual(player)
+	end)
 
 	GameManager.EstadoActual = "Waiting"
 	GameManager.TransicionEnProgreso = false
+	GameManager.RetornoEnProgreso = false
+	GameManager.IntentosRetorno = 0
+
+	-- Registrar escucha de fallos de inicialización de teletransporte autoritativo
+	if not GameManager.ConexionTeleportInitFailed then
+		GameManager.ConexionTeleportInitFailed = TeleportService.TeleportInitFailed:Connect(function(player: Player, result: Enum.TeleportResult, errorMsg: string, targetPlaceId: number)
+			warn(string.format("[GameManager] TeleportInitFailed: El teletransporte del jugador %s (UserId: %d) hacia el Place %d falló. Motivo: [%s] %s",
+				player.Name, player.UserId, targetPlaceId, tostring(result), tostring(errorMsg)))
+		end)
+	end
+
 	print("[UMBRA Server] GameManager iniciado. Estado inicial: Waiting.")
 end
 
@@ -71,6 +110,93 @@ function GameManager.ObtenerTotalJugadoresVivos(): number
 		end
 	end
 	return totalVivos
+end
+
+-- Retorna la lista de supervivientes vivos con datos públicos para modo espectador
+function GameManager.ObtenerSupervivientesVivos(): { { UserId: number, Name: string } }
+	local lista = {}
+	for player, vivo in GameManager.JugadoresVivos do
+		if vivo and player and player:IsDescendantOf(Players) then
+			table.insert(lista, {
+				UserId = player.UserId,
+				Name = player.Name,
+			})
+		end
+	end
+	return lista
+end
+
+-- Notifica a todos los clientes la lista actualizada de supervivientes vivos
+function GameManager.NotificarSupervivientes()
+	if GameManager.RemoteSupervivientes then
+		local lista = GameManager.ObtenerSupervivientesVivos()
+		GameManager.RemoteSupervivientes:FireAllClients(lista)
+	end
+end
+
+-- Sincroniza el estado individual de un jugador específico
+function GameManager.NotificarEstadoIndividual(player: Player)
+	if GameManager.RemoteEstadoIndividual and player and player:IsDescendantOf(Players) then
+		local estado = GameManager.EstadosJugadores[player] or "Alive"
+		GameManager.RemoteEstadoIndividual:FireClient(player, estado, GameManager.ModoExpedicion)
+	end
+end
+
+-- Gestiona el retorno voluntario e individual de un jugador hacia el Lobby
+function GameManager.SolicitarRetornoIndividual(player: Player)
+	if not player or not player:IsDescendantOf(Players) then return end
+	if not PlacesConfig.EsExpedicion() then return end
+
+	local estadoActual = GameManager.EstadosJugadores[player]
+	if estadoActual == "ReturningToLobby" or estadoActual == "Returned" then
+		print(string.format("[GameManager] Solicitud de retorno ignorada para %s: ya está retornando o en el Lobby.", player.Name))
+		return
+	end
+
+	print(string.format("[GameManager] Retorno voluntario individual solicitado por: %s (Estado actual: %s)", player.Name, tostring(estadoActual)))
+
+	-- Si el jugador estaba vivo al salir, desarmar y actualizar conteo de vivos
+	if GameManager.JugadoresVivos[player] then
+		GameManager.JugadoresVivos[player] = false
+		if GameManager.CombatService and typeof(GameManager.CombatService.DesregistrarJugador) == "function" then
+			pcall(GameManager.CombatService.DesregistrarJugador, player)
+		end
+
+		-- Si era el último vivo durante partida en curso, declarar GameOver para el resto de la sesión
+		if GameManager.EstadoActual == "Playing" and GameManager.ObtenerTotalJugadoresVivos() == 0 then
+			print("[GameManager] El último superviviente vivo ha abandonado. Finalizando expedición.")
+			GameManager.CambiarEstado("GameOver")
+		else
+			GameManager.NotificarSupervivientes()
+		end
+	end
+
+	GameManager.EstadosJugadores[player] = "ReturningToLobby"
+	GameManager.NotificarEstadoIndividual(player)
+
+	task.spawn(function()
+		if PlacesConfig.LobbyPlaceId <= 0 or PlacesConfig.LobbyPlaceId == PlacesConfig.ExpeditionPlaceId then
+			warn("[GameManager] Error de retorno individual: PlaceId del Lobby inválido en PlacesConfig.")
+			GameManager.EstadosJugadores[player] = if GameManager.ModoExpedicion == "Coop" then "Spectating" else "Dead"
+			GameManager.NotificarEstadoIndividual(player)
+			return
+		end
+
+		print(string.format("[GameManager] Teletransportando individualmente a %s (UserId: %d) hacia el Lobby...", player.Name, player.UserId))
+		local exitoTP, errTP = pcall(function()
+			TeleportService:TeleportAsync(PlacesConfig.LobbyPlaceId, { player })
+		end)
+
+		if exitoTP then
+			print(string.format("[GameManager] Retorno individual despachado con éxito para %s.", player.Name))
+		else
+			warn(string.format("[GameManager] Error en retorno individual de %s: %s", player.Name, tostring(errTP)))
+			if player:IsDescendantOf(Players) and GameManager.EstadosJugadores[player] == "ReturningToLobby" then
+				GameManager.EstadosJugadores[player] = if GameManager.ModoExpedicion == "Coop" then "Spectating" else "Dead"
+				GameManager.NotificarEstadoIndividual(player)
+			end
+		end
+	end)
 end
 
 -- Valida y ejecuta un cambio de estado en la máquina de estados
@@ -117,17 +243,41 @@ function GameManager.CambiarEstado(nuevoEstado: EstadoPartida): boolean
 
 	elseif nuevoEstado == "Playing" then
 		print("[UMBRA Server] ¡Expedición en curso! Supervivencia iniciada.")
+
+		-- Fijar autoritativamente el modo de expedición desde el inicio de la sesión
+		-- No se recalcula durante la partida para mantener coherencia si mueren o salen participantes
+		local totalConectados = #Players:GetPlayers()
+		GameManager.ModoExpedicion = if totalConectados > 1 then "Coop" else "Solo"
+		print(string.format("[UMBRA Server] Modo de Expedición fijado: %s (%d participantes iniciales)",
+			GameManager.ModoExpedicion, totalConectados))
+
 		-- Registrar como vivos a todos los jugadores conectados con personaje activo
 		for _, player in Players:GetPlayers() do
 			local char = player.Character
 			local hum = char and char:FindFirstChildOfClass("Humanoid")
 			if hum and hum.Health > 0 then
 				GameManager.JugadoresVivos[player] = true
+				GameManager.EstadosJugadores[player] = "Alive"
+			else
+				GameManager.EstadosJugadores[player] = "Alive"
 			end
+			GameManager.NotificarEstadoIndividual(player)
 		end
+		GameManager.NotificarSupervivientes()
 
 	elseif nuevoEstado == "GameOver" then
 		print("[UMBRA Server] DERROTA: Todos los supervivientes han caído.")
+		GameManager.RetornoEnProgreso = false
+		GameManager.IntentosRetorno = 0
+
+		-- Actualizar estado de todos los jugadores conectados
+		for player, _ in GameManager.JugadoresConectados do
+			local est = GameManager.EstadosJugadores[player]
+			if est ~= "ReturningToLobby" and est ~= "Returned" then
+				GameManager.EstadosJugadores[player] = "Dead"
+				GameManager.NotificarEstadoIndividual(player)
+			end
+		end
 
 		-- 1. Detener INMEDIATAMENTE la generación de enemigos y cancelar tareas
 		if GameManager.SpawnerService and GameManager.SpawnerService.Detener then
@@ -167,16 +317,67 @@ function GameManager.CambiarEstado(nuevoEstado: EstadoPartida): boolean
 	elseif nuevoEstado == "ReturningToLobby" then
 		print("[UMBRA Server] Retornando supervivientes al Santuario (Lobby)...")
 
-		if PlacesConfig.EsExpedicion() and PlacesConfig.LobbyPlaceId > 0 then
-			local jugadoresParaTeleport = Players:GetPlayers()
-			if #jugadoresParaTeleport > 0 then
+		if PlacesConfig.EsExpedicion() and PlacesConfig.LobbyPlaceId > 0 and PlacesConfig.LobbyPlaceId ~= PlacesConfig.ExpeditionPlaceId then
+			if GameManager.RetornoEnProgreso then
+				print("[GameManager] Retorno al Lobby ya en progreso. Evitando solicitud duplicada.")
+				GameManager.TransicionEnProgreso = false
+				return true
+			end
+
+			GameManager.RetornoEnProgreso = true
+			GameManager.IntentosRetorno = 0
+
+			local function ejecutarRetorno()
+				-- Filtrar solo jugadores que sigan efectivamente conectados a la sesión y no hayan retornado individualmente
+				local jugadoresParaTeleport: { Player } = {}
+				for _, player in ipairs(Players:GetPlayers()) do
+					if player and player:IsDescendantOf(Players) then
+						local est = GameManager.EstadosJugadores[player]
+						if est ~= "Returned" and est ~= "ReturningToLobby" then
+							GameManager.EstadosJugadores[player] = "ReturningToLobby"
+							table.insert(jugadoresParaTeleport, player)
+						end
+					end
+				end
+
+				if #jugadoresParaTeleport == 0 then
+					print("[GameManager] No hay jugadores conectados en la sesión para retornar al Lobby.")
+					GameManager.RetornoEnProgreso = false
+					GameManager.CambiarEstado("Waiting")
+					return
+				end
+
+				print(string.format("[GameManager] Solicitando teletransporte de retorno para %d jugador(es) hacia el Lobby (PlaceId: %d)...",
+					#jugadoresParaTeleport, PlacesConfig.LobbyPlaceId))
+
 				local exitoTP, errTP = pcall(function()
-					TeleportService:TeleportPartyAsync(PlacesConfig.LobbyPlaceId, jugadoresParaTeleport)
+					TeleportService:TeleportAsync(PlacesConfig.LobbyPlaceId, jugadoresParaTeleport)
 				end)
-				if not exitoTP then
-					warn(string.format("[GameManager] Error al retornar al Lobby: %s", tostring(errTP)))
+
+				if exitoTP then
+					print(string.format("[GameManager] Solicitud de teletransporte hacia el Lobby (PlaceId: %d) despachada con éxito.", PlacesConfig.LobbyPlaceId))
+				else
+					warn(string.format("[GameManager] Error en TeleportService:TeleportAsync hacia el Lobby (PlaceId: %d): %s",
+						PlacesConfig.LobbyPlaceId, tostring(errTP)))
+
+					-- Reintento controlado si aún no se supera el límite de reintentos
+					if GameManager.IntentosRetorno < GameManager.MaxIntentosRetorno then
+						GameManager.IntentosRetorno += 1
+						print(string.format("[GameManager] Programando reintento controlado de retorno (%d/%d) en 5 segundos...",
+							GameManager.IntentosRetorno, GameManager.MaxIntentosRetorno))
+						task.delay(5, function()
+							if GameManager.EstadoActual == "ReturningToLobby" then
+								ejecutarRetorno()
+							end
+						end)
+					else
+						warn("[GameManager] Se agotaron los reintentos controlados de retorno al Lobby. La sesión permanecerá disponible para reconexión.")
+						GameManager.RetornoEnProgreso = false
+					end
 				end
 			end
+
+			task.spawn(ejecutarRetorno)
 		else
 			-- Entorno local o Place único
 			GameManager.CambiarEstado("Waiting")
@@ -198,13 +399,15 @@ function GameManager.OnPlayerAdded(player: Player)
 
 	GameManager.JugadoresConectados[player] = true
 	GameManager.JugadoresVivos[player] = false
+	GameManager.EstadosJugadores[player] = "Alive"
 	GameManager.ConexionesPersonajes[player] = {}
 	print(string.format("[UMBRA Server] Jugador conectado: %s (UserId: %d)", player.Name, player.UserId))
 
-	-- Sincronizar estado actual inmediatamente
+	-- Sincronizar estado global e individual inmediatamente
 	if GameManager.RemoteSincronizar then
 		GameManager.RemoteSincronizar:FireClient(player, GameManager.EstadoActual)
 	end
+	GameManager.NotificarEstadoIndividual(player)
 
 	-- Escuchar carga y reaparición del personaje
 	local connChar = player.CharacterAdded:Connect(function(character)
@@ -229,7 +432,9 @@ end
 -- Manejador de desconexión de jugador
 function GameManager.OnPlayerRemoving(player: Player)
 	GameManager.JugadoresConectados[player] = nil
+	local estabaVivo = GameManager.JugadoresVivos[player]
 	GameManager.JugadoresVivos[player] = nil
+	GameManager.EstadosJugadores[player] = nil
 
 	local conns = GameManager.ConexionesPersonajes[player]
 	if conns then
@@ -241,10 +446,15 @@ function GameManager.OnPlayerRemoving(player: Player)
 
 	print(string.format("[UMBRA Server] Jugador desconectado: %s", player.Name))
 
-	-- Si estamos en juego y ya no quedan jugadores vivos, finalizar
+	-- Si estamos en juego y el jugador estaba vivo, actualizar lista de supervivientes
 	if GameManager.EstadoActual == "Playing" then
+		if estabaVivo then
+			GameManager.NotificarSupervivientes()
+		end
+
 		local vivos = GameManager.ObtenerTotalJugadoresVivos()
 		if vivos == 0 then
+			print("[UMBRA Server] No quedan supervivientes activos en la expedición tras la desconexión.")
 			GameManager.CambiarEstado("GameOver")
 		end
 	end
@@ -255,9 +465,12 @@ function GameManager.OnCharacterAdded(player: Player, character: Model)
 	local humanoid = character:WaitForChild("Humanoid", 10) :: Humanoid?
 	if not humanoid then return end
 
-	-- Si estamos en juego, marcar jugador como vivo
+	-- Si estamos en juego o comenzando, marcar jugador como vivo
 	if GameManager.EstadoActual == "Playing" or GameManager.EstadoActual == "Starting" then
 		GameManager.JugadoresVivos[player] = true
+		GameManager.EstadosJugadores[player] = "Alive"
+		GameManager.NotificarEstadoIndividual(player)
+		GameManager.NotificarSupervivientes()
 	end
 
 	local connDied: RBXScriptConnection? = nil
@@ -267,16 +480,29 @@ function GameManager.OnCharacterAdded(player: Player, character: Model)
 		end
 
 		GameManager.JugadoresVivos[player] = false
+		GameManager.EstadosJugadores[player] = "Dead"
 		print(string.format("[UMBRA Server] Superviviente %s ha caído.", player.Name))
 
-		-- Si la partida está en curso, verificar si quedan supervivientes vivos
+		-- Desactivar de inmediato cualquier participación en combate
+		if GameManager.CombatService and typeof(GameManager.CombatService.DesregistrarJugador) == "function" then
+			pcall(GameManager.CombatService.DesregistrarJugador, player)
+		end
+
+		-- Si la partida está en curso, verificar lógica según modo
 		if GameManager.EstadoActual == "Playing" then
 			local vivosRestantes = GameManager.ObtenerTotalJugadoresVivos()
-			print(string.format("[UMBRA Server] Supervivientes restantes con vida: %d", vivosRestantes))
+			print(string.format("[UMBRA Server] Supervivientes restantes con vida: %d (Modo: %s)",
+				vivosRestantes, GameManager.ModoExpedicion))
 
-			-- Si no queda ningún superviviente vivo, declarar GameOver
-			if vivosRestantes == 0 then
+			if GameManager.ModoExpedicion == "Solo" or vivosRestantes == 0 then
+				-- En modo individual O cuando caen todos los integrantes en cooperativo: Derrota global
 				GameManager.CambiarEstado("GameOver")
+			else
+				-- En modo cooperativo con compañeros vivos: Activar espectador individual
+				print(string.format("[UMBRA Server] Activando modo espectador para %s.", player.Name))
+				GameManager.EstadosJugadores[player] = "Spectating"
+				GameManager.NotificarEstadoIndividual(player)
+				GameManager.NotificarSupervivientes()
 			end
 		end
 	end)

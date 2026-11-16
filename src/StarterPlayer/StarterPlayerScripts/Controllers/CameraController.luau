@@ -14,14 +14,35 @@ local CameraController = {
 	Offset = Vector3.new(0, 38, 24), -- Elevación de 38 studs e inclinación hacia atrás de 24 studs (~58 grados)
 	Suavizado = 0.15, -- Factor de interpolación lineal (Lerp)
 	ObjetivoActual = nil :: BasePart?,
+	Espectando = false,
 	ConexionRender = nil :: RBXScriptConnection?,
 }
+
+function CameraController.FijarObjetivo(targetPart: BasePart?)
+	CameraController.ObjetivoActual = targetPart
+	if targetPart then
+		local posObjetivo = targetPart.Position + CameraController.Offset
+		Camera.CFrame = CFrame.lookAt(posObjetivo, targetPart.Position)
+	end
+end
+
+function CameraController.EstablecerModoEspectador(espectando: boolean, targetPart: BasePart?)
+	CameraController.Espectando = espectando
+	if espectando and targetPart then
+		CameraController.FijarObjetivo(targetPart)
+	elseif not espectando then
+		if localPlayer.Character and localPlayer.Character:FindFirstChild("HumanoidRootPart") then
+			CameraController.FijarObjetivo(localPlayer.Character.HumanoidRootPart :: BasePart)
+		end
+	end
+end
 
 function CameraController.Iniciar()
 	CameraController.Activo = true
 	Camera.CameraType = Enum.CameraType.Scriptable
 
 	local function vincularPersonaje(character: Model)
+		if CameraController.Espectando then return end
 		local root = character:WaitForChild("HumanoidRootPart", 10) :: BasePart?
 		if root then
 			CameraController.ObjetivoActual = root

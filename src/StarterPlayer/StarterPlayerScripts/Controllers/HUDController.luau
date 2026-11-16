@@ -31,10 +31,20 @@ local HUDController = {
 	OverlayFondo = nil :: Frame?,
 	TextoTiempoFinal = nil :: TextLabel?,
 	NotaReaparicion = nil :: TextLabel?,
+	TituloGameOver = nil :: TextLabel?,
+	SubtituloGameOver = nil :: TextLabel?,
 	TiempoInicio = 0,
 	TiempoFinalCongelado = 0,
 	RelojCongelado = false,
 	ConexionReloj = nil :: RBXScriptConnection?,
+	-- Modo espectador y estado individual
+	ModoExpedicion = "Solo",
+	EstadoIndividual = "Alive",
+	SupervivientesVivos = {} :: { { UserId: number, Name: string } },
+	IndiceEspectador = 1,
+	ContenedorEspectador = nil :: Frame?,
+	TextoEspectadorNombre = nil :: TextLabel?,
+	BotonSalirLobby = nil :: TextButton?,
 }
 
 function HUDController.Iniciar()
@@ -216,6 +226,7 @@ function HUDController.Iniciar()
 	tituloGO.Text = "HAS CAÍDO EN LA OSCURIDAD"
 	tituloGO.ZIndex = 52
 	tituloGO.Parent = modal
+	HUDController.TituloGameOver = tituloGO
 
 	local subtituloGO = Instance.new("TextLabel")
 	subtituloGO.Name = "SubtituloGameOver"
@@ -229,6 +240,7 @@ function HUDController.Iniciar()
 	subtituloGO.Text = "El Vacío ha consumido tu último resplandor. La expedición ha terminado."
 	subtituloGO.ZIndex = 52
 	subtituloGO.Parent = modal
+	HUDController.SubtituloGameOver = subtituloGO
 
 	local boxTiempo = Instance.new("Frame")
 	boxTiempo.Name = "BoxTiempo"
@@ -287,6 +299,124 @@ function HUDController.Iniciar()
 	notaReaparicion.Parent = modal
 	HUDController.NotaReaparicion = notaReaparicion
 
+	-- 5.1 Barra de Modo Espectador (Cooperativo)
+	local contenedorEsp = Instance.new("Frame")
+	contenedorEsp.Name = "ContenedorEspectador"
+	contenedorEsp.Size = UDim2.new(0, 520, 0, 78)
+	contenedorEsp.Position = UDim2.new(0.5, -260, 1, -95)
+	contenedorEsp.BackgroundColor3 = Color3.fromRGB(15, 10, 22)
+	contenedorEsp.BackgroundTransparency = 0.15
+	contenedorEsp.BorderSizePixel = 0
+	contenedorEsp.Visible = false
+	contenedorEsp.ZIndex = 40
+	contenedorEsp.Parent = gui
+	HUDController.ContenedorEspectador = contenedorEsp
+
+	local cornerEsp = Instance.new("UICorner")
+	cornerEsp.CornerRadius = UDim.new(0, 10)
+	cornerEsp.Parent = contenedorEsp
+
+	local strokeEsp = Instance.new("UIStroke")
+	strokeEsp.Color = Color3.fromRGB(130, 70, 230)
+	strokeEsp.Thickness = 1.5
+	strokeEsp.Parent = contenedorEsp
+
+	local headerEsp = Instance.new("TextLabel")
+	headerEsp.Name = "HeaderEspectador"
+	headerEsp.Size = UDim2.new(1, -20, 0, 18)
+	headerEsp.Position = UDim2.new(0, 10, 0, 6)
+	headerEsp.BackgroundTransparency = 1
+	headerEsp.TextColor3 = Color3.fromRGB(120, 220, 255)
+	headerEsp.Font = Enum.Font.GothamBold
+	headerEsp.TextSize = 11
+	headerEsp.Text = "MODO ESPECTADOR — OBSERVANDO COMPAÑERO"
+	headerEsp.ZIndex = 41
+	headerEsp.Parent = contenedorEsp
+
+	local btnAnt = Instance.new("TextButton")
+	btnAnt.Name = "BotonAnterior"
+	btnAnt.Size = UDim2.new(0, 36, 0, 36)
+	btnAnt.Position = UDim2.new(0, 12, 0, 28)
+	btnAnt.BackgroundColor3 = Color3.fromRGB(30, 20, 45)
+	btnAnt.TextColor3 = Color3.fromRGB(240, 240, 255)
+	btnAnt.Font = Enum.Font.GothamBlack
+	btnAnt.TextSize = 18
+	btnAnt.Text = "◄"
+	btnAnt.ZIndex = 41
+	btnAnt.Parent = contenedorEsp
+	local cornerBtnAnt = Instance.new("UICorner")
+	cornerBtnAnt.CornerRadius = UDim.new(0, 6)
+	cornerBtnAnt.Parent = btnAnt
+	btnAnt.MouseButton1Click:Connect(function()
+		HUDController.CambiarObjetivoEspectador(-1)
+	end)
+
+	local txtNombreEsp = Instance.new("TextLabel")
+	txtNombreEsp.Name = "TextoEspectadorNombre"
+	txtNombreEsp.Size = UDim2.new(0, 220, 0, 36)
+	txtNombreEsp.Position = UDim2.new(0, 54, 0, 28)
+	txtNombreEsp.BackgroundColor3 = Color3.fromRGB(22, 14, 32)
+	txtNombreEsp.BackgroundTransparency = 0.4
+	txtNombreEsp.TextColor3 = Color3.fromRGB(255, 255, 255)
+	txtNombreEsp.Font = Enum.Font.GothamBold
+	txtNombreEsp.TextSize = 14
+	txtNombreEsp.Text = "Buscando superviviente..."
+	txtNombreEsp.ZIndex = 41
+	txtNombreEsp.Parent = contenedorEsp
+	local cornerTxt = Instance.new("UICorner")
+	cornerTxt.CornerRadius = UDim.new(0, 6)
+	cornerTxt.Parent = txtNombreEsp
+	HUDController.TextoEspectadorNombre = txtNombreEsp
+
+	local btnSig = Instance.new("TextButton")
+	btnSig.Name = "BotonSiguiente"
+	btnSig.Size = UDim2.new(0, 36, 0, 36)
+	btnSig.Position = UDim2.new(0, 280, 0, 28)
+	btnSig.BackgroundColor3 = Color3.fromRGB(30, 20, 45)
+	btnSig.TextColor3 = Color3.fromRGB(240, 240, 255)
+	btnSig.Font = Enum.Font.GothamBlack
+	btnSig.TextSize = 18
+	btnSig.Text = "►"
+	btnSig.ZIndex = 41
+	btnSig.Parent = contenedorEsp
+	local cornerBtnSig = Instance.new("UICorner")
+	cornerBtnSig.CornerRadius = UDim.new(0, 6)
+	cornerBtnSig.Parent = btnSig
+	btnSig.MouseButton1Click:Connect(function()
+		HUDController.CambiarObjetivoEspectador(1)
+	end)
+
+	local btnSalir = Instance.new("TextButton")
+	btnSalir.Name = "BotonSalirLobby"
+	btnSalir.Size = UDim2.new(0, 180, 0, 36)
+	btnSalir.Position = UDim2.new(1, -192, 0, 28)
+	btnSalir.BackgroundColor3 = Color3.fromRGB(160, 35, 55)
+	btnSalir.TextColor3 = Color3.fromRGB(255, 255, 255)
+	btnSalir.Font = Enum.Font.GothamBold
+	btnSalir.TextSize = 12
+	btnSalir.Text = "REGRESAR AL LOBBY"
+	btnSalir.ZIndex = 41
+	btnSalir.Parent = contenedorEsp
+	local cornerBtnSalir = Instance.new("UICorner")
+	cornerBtnSalir.CornerRadius = UDim.new(0, 6)
+	cornerBtnSalir.Parent = btnSalir
+	HUDController.BotonSalirLobby = btnSalir
+
+	btnSalir.MouseButton1Click:Connect(function()
+		btnSalir.Text = "Teletransportando..."
+		btnSalir.Active = false
+		local remotesFolder = ReplicatedStorage:FindFirstChild("Remotes")
+		if remotesFolder then
+			local remoteRetorno = remotesFolder:FindFirstChild("SolicitarRetornoIndividual") :: RemoteEvent?
+			if remoteRetorno then
+				remoteRetorno:FireServer()
+			end
+		end
+	end)
+	notaReaparicion.ZIndex = 52
+	notaReaparicion.Parent = modal
+	HUDController.NotaReaparicion = notaReaparicion
+
 	-- 6. Conectar vida y detección de muerte del personaje
 	local function vincularSalud(character: Model)
 		local humanoid = character:WaitForChild("Humanoid", 10) :: Humanoid?
@@ -312,7 +442,14 @@ function HUDController.Iniciar()
 
 		humanoid.Died:Connect(function()
 			if not PlacesConfig.EsLobby() then
-				HUDController.DispararDerrota()
+				if HUDController.ModoExpedicion == "Solo" then
+					HUDController.DispararDerrota()
+				else
+					-- En modo cooperativo, ocultar barra de salud local
+					if HUDController.ContenedorVida then
+						HUDController.ContenedorVida.Visible = false
+					end
+				end
 			end
 		end)
 	end
@@ -484,12 +621,109 @@ function HUDController.ActualizarEstado(nuevoEstado: string)
 		if HUDController.BannerMatchmaking then HUDController.BannerMatchmaking.Visible = false end
 
 	elseif nuevoEstado == "GameOver" then
+		HUDController.DetenerEspectador()
+		if HUDController.ModoExpedicion == "Coop" then
+			if HUDController.TituloGameOver then
+				HUDController.TituloGameOver.Text = "TODA LA ESCUADRA HA CAÍDO"
+			end
+			if HUDController.SubtituloGameOver then
+				HUDController.SubtituloGameOver.Text = "Todos los supervivientes han sido consumidos por El Vacío. La expedición ha terminado."
+			end
+		end
 		HUDController.DispararDerrota()
 
 	elseif nuevoEstado == "ReturningToLobby" then
+		if HUDController.BotonSalirLobby then
+			HUDController.BotonSalirLobby.Text = "Teletransportando..."
+			HUDController.BotonSalirLobby.Active = false
+		end
 		if HUDController.NotaReaparicion then
 			HUDController.NotaReaparicion.Text = "Teletransportando al Santuario (Lobby)..."
 			HUDController.NotaReaparicion.TextColor3 = Color3.fromRGB(80, 220, 255)
+		end
+	end
+end
+
+-- =========================================================================
+-- MÉTODOS DEL MODO ESPECTADOR (COOPERATIVO)
+-- =========================================================================
+
+function HUDController.IniciarEspectador()
+	if HUDController.ContenedorVida then
+		HUDController.ContenedorVida.Visible = false
+	end
+	if HUDController.ModalGameOver then
+		HUDController.ModalGameOver.Visible = false
+	end
+	if HUDController.OverlayFondo then
+		HUDController.OverlayFondo.Visible = false
+	end
+
+	if HUDController.ContenedorEspectador then
+		HUDController.ContenedorEspectador.Visible = true
+	end
+
+	HUDController.CambiarObjetivoEspectador(0)
+end
+
+function HUDController.DetenerEspectador()
+	if HUDController.ContenedorEspectador then
+		HUDController.ContenedorEspectador.Visible = false
+	end
+
+	local controllers = localPlayer:WaitForChild("PlayerScripts"):WaitForChild("Controllers")
+	local CameraController = require(controllers:WaitForChild("CameraController") :: ModuleScript)
+	CameraController.EstablecerModoEspectador(false, nil)
+end
+
+function HUDController.ActualizarSupervivientes(lista: { { UserId: number, Name: string } })
+	HUDController.SupervivientesVivos = lista or {}
+	if HUDController.EstadoIndividual == "Spectating" then
+		HUDController.CambiarObjetivoEspectador(0)
+	end
+end
+
+function HUDController.CambiarObjetivoEspectador(delta: number)
+	local lista = HUDController.SupervivientesVivos
+	if not lista or #lista == 0 then
+		if HUDController.TextoEspectadorNombre then
+			HUDController.TextoEspectadorNombre.Text = "Sin supervivientes vivos"
+		end
+		return
+	end
+
+	HUDController.IndiceEspectador = ((HUDController.IndiceEspectador - 1 + delta) % #lista) + 1
+	local obj = lista[HUDController.IndiceEspectador]
+
+	if obj then
+		if HUDController.TextoEspectadorNombre then
+			HUDController.TextoEspectadorNombre.Text = obj.Name
+		end
+
+		local targetPlayer = Players:GetPlayerByUserId(obj.UserId)
+		if targetPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") then
+			local controllers = localPlayer:WaitForChild("PlayerScripts"):WaitForChild("Controllers")
+			local CameraController = require(controllers:WaitForChild("CameraController") :: ModuleScript)
+			CameraController.EstablecerModoEspectador(true, targetPlayer.Character.HumanoidRootPart :: BasePart)
+		end
+	end
+end
+
+function HUDController.ActualizarEstadoIndividual(nuevoEstado: string, modo: string)
+	HUDController.EstadoIndividual = nuevoEstado
+	if modo and modo ~= "" then
+		HUDController.ModoExpedicion = modo
+	end
+
+	if nuevoEstado == "Spectating" then
+		HUDController.IniciarEspectador()
+	elseif nuevoEstado == "ReturningToLobby" then
+		if HUDController.BotonSalirLobby then
+			HUDController.BotonSalirLobby.Text = "Teletransportando..."
+			HUDController.BotonSalirLobby.Active = false
+		end
+		if HUDController.NotaReaparicion then
+			HUDController.NotaReaparicion.Text = "Teletransportando al Santuario (Lobby)..."
 		end
 	end
 end

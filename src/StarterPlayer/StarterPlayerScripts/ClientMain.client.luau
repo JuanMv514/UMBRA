@@ -60,6 +60,23 @@ if remotesFolder then
 			end
 		end)
 	end
+
+	-- Escuchar estado individual del jugador (modo espectador / retorno)
+	local remoteIndividual = remotesFolder:WaitForChild("SincronizarEstadoIndividual", 5) :: RemoteEvent?
+	if remoteIndividual and remoteIndividual:IsA("RemoteEvent") then
+		remoteIndividual.OnClientEvent:Connect(function(estadoIndividual: string, modoExpedicion: string)
+			print(string.format("[UMBRA Client] Estado individual: %s (Modo: %s)", estadoIndividual, modoExpedicion))
+			HUDController.ActualizarEstadoIndividual(estadoIndividual, modoExpedicion)
+		end)
+	end
+
+	-- Escuchar lista de supervivientes vivos para modo espectador
+	local remoteSupervivientes = remotesFolder:WaitForChild("ActualizarSupervivientes", 5) :: RemoteEvent?
+	if remoteSupervivientes and remoteSupervivientes:IsA("RemoteEvent") then
+		remoteSupervivientes.OnClientEvent:Connect(function(lista: any)
+			HUDController.ActualizarSupervivientes(lista)
+		end)
+	end
 end
 
 -- 4. Gestión segura de la carga del personaje
