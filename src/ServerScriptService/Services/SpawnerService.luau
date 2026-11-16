@@ -9,9 +9,11 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local ConfigFolder = ReplicatedStorage:WaitForChild("Config")
 local OleadasConfig = require(ConfigFolder:WaitForChild("OleadasConfig") :: ModuleScript)
+local JefeConfig = require(ConfigFolder:WaitForChild("JefeConfig") :: ModuleScript)
 
 local EnemyService = nil :: any -- Inyectado al iniciar
 local GameManager = nil :: any -- Inyectado al iniciar o vincular
+local BossService = nil :: any -- Inyectado al vincular
 
 local SpawnerService = {
 	Activo = false,
@@ -24,6 +26,10 @@ local SpawnerService = {
 
 function SpawnerService.VincularGameManager(gmRef: any)
 	GameManager = gmRef
+end
+
+function SpawnerService.VincularBossService(bossRef: any)
+	BossService = bossRef
 end
 
 function SpawnerService.Iniciar(enemyServiceRef: any, gmRef: any?)
@@ -42,12 +48,21 @@ function SpawnerService.Iniciar(enemyServiceRef: any, gmRef: any?)
 
 	print("[UMBRA Server] SpawnerService iniciado (Director de Oleadas activo).")
 
-	-- 1. Hilo del reloj de oleadas
+	-- 1. Hilo de respaldo de reloj lógico (si GameManager no provee ObtenerTiempoLogico)
 	local hiloReloj = task.spawn(function()
+		local RunService = game:GetService("RunService")
+		local ultimoTiempo = os.clock()
 		while SpawnerService.Activo do
-			task.wait(1)
+			RunService.Heartbeat:Wait()
 			if not SpawnerService.Activo then break end
-			SpawnerService.TiempoTranscurrido += 1
+			local ahora = os.clock()
+			local dt = ahora - ultimoTiempo
+			ultimoTiempo = ahora
+			if GameManager and typeof(GameManager.ObtenerTiempoLogico) == "function" then
+				SpawnerService.TiempoTranscurrido = GameManager.ObtenerTiempoLogico()
+			else
+				SpawnerService.TiempoTranscurrido += dt
+			end
 		end
 	end)
 	table.insert(SpawnerService.HilosSpawner, hiloReloj)
@@ -64,7 +79,11 @@ function SpawnerService.Iniciar(enemyServiceRef: any, gmRef: any?)
 			end
 
 			local fase = SpawnerService.ObtenerFaseActual()
-			local intervalo = 1 / math.max(fase.TasaSpawnPorSegundo, 0.5)
+			local tasaSpawn = fase.TasaSpawnPorSegundo
+			if BossService and typeof(BossService.EstaJefeActivo) == "function" and BossService.EstaJefeActivo() then
+				tasaSpawn *= JefeConfig.FactorSpawnHordaDuranteJefe
+			end
+			local intervalo = 1 / math.max(tasaSpawn, 0.2)
 
 			task.wait(intervalo)
 			if not SpawnerService.Activo then break end
@@ -92,7 +111,10 @@ function SpawnerService.Iniciar(enemyServiceRef: any, gmRef: any?)
 end
 
 function SpawnerService.ObtenerFaseActual()
-	local minutos = SpawnerService.TiempoTranscurrido / 60
+	local tiempoLogico = if GameManager and typeof(GameManager.ObtenerTiempoLogico) == "function"
+		then GameManager.ObtenerTiempoLogico()
+		else SpawnerService.TiempoTranscurrido
+	local minutos = tiempoLogico / 60
 	for _, fase in OleadasConfig do
 		if minutos >= fase.MinutoInicio and minutos < fase.MinutoFin then
 			return fase

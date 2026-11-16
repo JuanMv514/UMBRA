@@ -11,6 +11,7 @@ local RunService = game:GetService("RunService")
 
 local ConfigFolder = ReplicatedStorage:WaitForChild("Config")
 local EnemigosConfig = require(ConfigFolder:WaitForChild("EnemigosConfig") :: ModuleScript)
+local JefeConfig = require(ConfigFolder:WaitForChild("JefeConfig") :: ModuleScript)
 
 export type EnemigoInstancia = {
 	Id: string,
@@ -20,8 +21,11 @@ export type EnemigoInstancia = {
 	VidaActual: number,
 	VidaMax: number,
 	Velocidad: number,
+	VelocidadBase: number,
+	FinRalentizacion: number,
 	Danio: number,
 	XpOtorga: number,
+	EsJefe: boolean?,
 }
 
 local EnemyService = {
@@ -30,7 +34,33 @@ local EnemyService = {
 	CarpetaContenedora = nil :: Folder?,
 	ContadorIds = 0,
 	BucleConexion = nil :: RBXScriptConnection?,
+	CallbackEnemigoEliminado = nil :: ((tipoId: string, posicion: Vector3, xpOtorga: number) -> ())?,
+	CallbackDanioJefe = nil :: ((vidaActual: number, vidaMax: number) -> ())?,
+	CallbackJefeEliminado = nil :: (() -> ())?,
+	ReconnectionService = nil :: any,
 }
+
+function EnemyService.VincularReconnectionService(reconRef: any)
+	EnemyService.ReconnectionService = reconRef
+end
+
+function EnemyService.EstablecerCallbackEliminacion(callback: ((tipoId: string, posicion: Vector3, xpOtorga: number) -> ())?)
+	EnemyService.CallbackEnemigoEliminado = callback
+end
+
+function EnemyService.EstablecerCallbacksJefe(onDanio: ((number, number) -> ())?, onEliminado: (() -> ())?)
+	EnemyService.CallbackDanioJefe = onDanio
+	EnemyService.CallbackJefeEliminado = onEliminado
+end
+
+function EnemyService.RegistrarEntidadJefe(instancia: EnemigoInstancia)
+	if not EnemyService.Activo then return end
+	instancia.EsJefe = true
+	if EnemyService.CarpetaContenedora and instancia.Part then
+		instancia.Part.Parent = EnemyService.CarpetaContenedora
+	end
+	EnemyService.EnemigosActivos[instancia.Id] = instancia
+end
 
 -- Inicializa el contenedor en Workspace y el bucle de movimiento
 function EnemyService.Iniciar()
@@ -62,6 +92,11 @@ local function obtenerPosicionObjetivo(posEnemigo: Vector3): Vector3?
 	local menorDistancia = math.huge
 
 	for _, player in Players:GetPlayers() do
+		if EnemyService.ReconnectionService and typeof(EnemyService.ReconnectionService.EstaJugadorProtegido) == "function" then
+			if EnemyService.ReconnectionService.EstaJugadorProtegido(player) then
+				continue
+			end
+		end
 		local character = player.Character
 		if character then
 			local root = character:FindFirstChild("HumanoidRootPart") :: BasePart?
@@ -87,6 +122,11 @@ function EnemyService.ActualizarMovimiento(dt: number)
 		if not enemigo.Part or not enemigo.Part.Parent then
 			EnemyService.EnemigosActivos[id] = nil
 			continue
+		end
+
+		if enemigo.FinRalentizacion > 0 and os.clock() >= enemigo.FinRalentizacion then
+			enemigo.FinRalentizacion = 0
+			enemigo.Velocidad = enemigo.VelocidadBase
 		end
 
 		local objetivo = obtenerPosicionObjetivo(enemigo.Part.Position)
@@ -154,6 +194,8 @@ function EnemyService.CrearEnemigo(tipoId: string, posicion: Vector3, multiplica
 		VidaActual = config.VidaBase * mult,
 		VidaMax = config.VidaBase * mult,
 		Velocidad = config.VelocidadBase,
+		VelocidadBase = config.VelocidadBase,
+		FinRalentizacion = 0,
 		Danio = config.DanioBase,
 		XpOtorga = config.XpOtorga,
 	}
@@ -162,14 +204,31 @@ function EnemyService.CrearEnemigo(tipoId: string, posicion: Vector3, multiplica
 	return instancia
 end
 
--- Aplica daño a un enemigo desde un ataque del jugador
-function EnemyService.DanioEnemigo(enemigoId: string, cantidad: number): boolean
-	if not EnemyService.Activo then return false end
+-- Aplica ralentización temporal a un enemigo (ej. Nova de Escarcha)
+function EnemyService.AplicarRalentizacion(enemigoId: string, factorVelocidad: number, duracionSegundos: number)
+	if not EnemyService.Activo then return end
+	local enemigo = EnemyService.EnemigosActivos[enemigoId]
+	if not enemigo then return end
+
+	local factor = math.clamp(factorVelocidad, 0.1, 1.0)
+	if enemigo.EsJefe then
+		local reduccion = (1 - factor) * JefeConfig.ResistenciaRalentizacion
+		factor = 1 - reduccion
+	end
+
+	enemigo.Velocidad = enemigo.VelocidadBase * factor
+	enemigo.FinRalentizacion = math.max(enemigo.FinRalentizacion, os.clock() + duracionSegundos)
+end
+
+-- Aplica daño a un enemigo desde un ataque del jugador y retorna (danioEfectivo, fueEliminado)
+function EnemyService.DanioEnemigo(enemigoId: string, cantidad: number): (number, boolean)
+	if not EnemyService.Activo then return 0, false end
 
 	local enemigo = EnemyService.EnemigosActivos[enemigoId]
-	if not enemigo then return false end
+	if not enemigo or enemigo.VidaActual <= 0 then return 0, false end
 
-	enemigo.VidaActual -= cantidad
+	local danioEfectivo = math.min(math.max(cantidad, 0), enemigo.VidaActual)
+	enemigo.VidaActual -= danioEfectivo
 
 	if enemigo.Part then
 		local origColor = enemigo.Part.Color
@@ -181,12 +240,16 @@ function EnemyService.DanioEnemigo(enemigoId: string, cantidad: number): boolean
 		end)
 	end
 
-	if enemigo.VidaActual <= 0 then
-		EnemyService.EliminarEnemigo(enemigoId, true)
-		return true
+	if enemigo.EsJefe and danioEfectivo > 0 and EnemyService.CallbackDanioJefe then
+		EnemyService.CallbackDanioJefe(math.max(0, enemigo.VidaActual), enemigo.VidaMax)
 	end
 
-	return false
+	if enemigo.VidaActual <= 0 then
+		EnemyService.EliminarEnemigo(enemigoId, true)
+		return danioEfectivo, true
+	end
+
+	return danioEfectivo, false
 end
 
 -- Daño por contacto con el jugador
@@ -194,6 +257,11 @@ function EnemyService.AplicarDanioAJugador(enemigo: EnemigoInstancia)
 	if not EnemyService.Activo then return end
 
 	for _, player in Players:GetPlayers() do
+		if EnemyService.ReconnectionService and typeof(EnemyService.ReconnectionService.EstaJugadorProtegido) == "function" then
+			if EnemyService.ReconnectionService.EstaJugadorProtegido(player) then
+				continue
+			end
+		end
 		local character = player.Character
 		if character then
 			local humanoid = character:FindFirstChildOfClass("Humanoid")
@@ -215,8 +283,17 @@ function EnemyService.EliminarEnemigo(enemigoId: string, generoDrop: boolean)
 
 	EnemyService.EnemigosActivos[enemigoId] = nil
 
+	local posDrop = if enemigo.Part and enemigo.Part.Parent then enemigo.Part.Position else Vector3.zero
 	if enemigo.Part then
 		enemigo.Part:Destroy()
+	end
+
+	if generoDrop then
+		if enemigo.EsJefe and EnemyService.CallbackJefeEliminado then
+			EnemyService.CallbackJefeEliminado()
+		elseif EnemyService.CallbackEnemigoEliminado then
+			EnemyService.CallbackEnemigoEliminado(enemigo.TipoId, posDrop, enemigo.XpOtorga)
+		end
 	end
 end
 

@@ -1,94 +1,112 @@
 --!strict
 -- MatchmakingService.luau
--- Manejador autoritativo de emparejamiento, círculo mágico y teletransporte a la expedición en UMBRA.
--- Responsabilidad: Operar exclusivamente en el Lobby (Santuario), registrar participantes en el círculo,
--- gestionar la cuenta regresiva de 15s y enviar al grupo al Place de Expedición mediante TeleportService.
+-- Manejador autoritativo de acceso a expediciones (Individual y Salas Públicas Cooperativas) en UMBRA.
+-- Responsabilidad: Operar exclusivamente en el Lobby (Santuario), gestionar salas públicas de hasta 4 jugadores,
+-- sucesión automática de responsable y teletransporte a servidores reservados de Expedición.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
 local TeleportService = game:GetService("TeleportService")
 local Workspace = game:GetService("Workspace")
 
 local ConfigFolder = ReplicatedStorage:WaitForChild("Config")
+local ModulesFolder = ReplicatedStorage:WaitForChild("Modules")
 local PlacesConfig = require(ConfigFolder:WaitForChild("PlacesConfig") :: ModuleScript)
+local TiposAlpha = require(ModulesFolder:WaitForChild("TiposAlpha") :: ModuleScript)
 
 local GameManager = nil :: any
+local ReconnectionService = nil :: any
 
-export type EstadoPortal = {
-	Total: number,
-	Maximo: number,
-	CuentaAtras: number,
-	CuentaActiva: boolean,
-	MensajeAlerta: string?,
+type ParticipanteInterno = {
+	Player: Player,
+	UserId: number,
+	Nombre: string,
+	Estado: TiposAlpha.EstadoParticipanteSala,
+	OrdenLlegada: number,
+}
+
+type SalaInterna = {
+	SalaId: string,
+	TiempoCreacion: number,
+	ResponsableUserId: number,
+	CapacidadMaxima: number,
+	Cerrada: boolean,
+	IniciandoExpedicion: boolean,
+	SiguienteOrden: number,
+	Participantes: { ParticipanteInterno },
 }
 
 local MatchmakingService = {
 	Activo = false,
-	Participantes = {} :: { [Player]: boolean },
 	MaxJugadores = 4,
-	TiempoCuentaAtras = 15,
-	SegundosRestantes = 15,
-	CuentaActiva = false,
-	HiloCuenta = nil :: thread?,
-	BucleDeteccion = nil :: RBXScriptConnection?,
+	ContadorSalas = 0,
+	SalasActivas = {} :: { [string]: SalaInterna },
+	SalaPorJugador = {} :: { [Player]: string },
+	JugadoresTeletransportando = {} :: { [Player]: boolean },
 	PosicionCirculo = Vector3.new(0, 0.5, -45),
-	RadioCirculo = 11,
-	RemotePortal = nil :: RemoteEvent?,
-	BillboardGui = nil :: BillboardGui?,
-	TextoContador = nil :: TextLabel?,
-	TextoTiempo = nil :: TextLabel?,
+	RemoteAccionLobby = nil :: RemoteEvent?,
+	RemoteSincronizarSala = nil :: RemoteEvent?,
 	PlataformaVisual = nil :: BasePart?,
-	TeletransporteEnProgreso = false,
+	BillboardGui = nil :: BillboardGui?,
 }
+
+local function asegurarRemote(remotesFolder: Instance, nombre: string): RemoteEvent
+	local existente = remotesFolder:FindFirstChild(nombre)
+	if existente and existente:IsA("RemoteEvent") then
+		return existente
+	end
+	local nuevo = Instance.new("RemoteEvent")
+	nuevo.Name = nombre
+	nuevo.Parent = remotesFolder
+	return nuevo
+end
+
+function MatchmakingService.VincularReconnectionService(reconRef: any)
+	ReconnectionService = reconRef
+end
 
 function MatchmakingService.Iniciar(gameManagerRef: any)
 	GameManager = gameManagerRef
 	MatchmakingService.Activo = true
 
-	-- Asegurar RemoteEvent en ReplicatedStorage.Remotes
-	local remotesFolder = ReplicatedStorage:WaitForChild("Remotes", 5)
-	if remotesFolder then
-		local remote = remotesFolder:FindFirstChild("SincronizarMatchmaking") :: RemoteEvent?
-		if not remote then
-			remote = Instance.new("RemoteEvent")
-			remote.Name = "SincronizarMatchmaking"
-			remote.Parent = remotesFolder
-		end
-		MatchmakingService.RemotePortal = remote
+	local remotesFolder = ReplicatedStorage:FindFirstChild("Remotes")
+	if not remotesFolder then
+		remotesFolder = Instance.new("Folder")
+		remotesFolder.Name = "Remotes"
+		remotesFolder.Parent = ReplicatedStorage
 	end
 
-	-- Construir plataforma física del círculo mágico en el Lobby
+	MatchmakingService.RemoteAccionLobby = asegurarRemote(remotesFolder, "AccionEmparejamientoLobby")
+	MatchmakingService.RemoteSincronizarSala = asegurarRemote(remotesFolder, "SincronizarSalaCooperativa")
+
+	if MatchmakingService.RemoteAccionLobby then
+		MatchmakingService.RemoteAccionLobby.OnServerEvent:Connect(function(player: Player, accion: any)
+			MatchmakingService.ProcesarAccionLobby(player, accion)
+		end)
+	end
+
+	-- Construir plataforma física decorativa del círculo rúnico en el Lobby
 	MatchmakingService.ConstruirPlataformaFisica()
 
-	-- Bucle periódico de detección de presencia de jugadores dentro del radio (0.2s)
-	local acumulador = 0
-	MatchmakingService.BucleDeteccion = RunService.Heartbeat:Connect(function(dt: number)
-		acumulador += dt
-		if acumulador >= 0.2 then
-			acumulador = 0
-			MatchmakingService.ActualizarDeteccion()
-		end
+	-- Manejar desconexión de jugadores en salas activas
+	Players.PlayerRemoving:Connect(function(player: Player)
+		MatchmakingService.JugadoresTeletransportando[player] = nil
+		MatchmakingService.RetirarJugadorDeSala(player, true)
 	end)
 
-	-- Manejar desconexión de jugadores del círculo
-	Players.PlayerRemoving:Connect(function(player)
-		if MatchmakingService.Participantes[player] then
-			MatchmakingService.Participantes[player] = nil
-			MatchmakingService.OnParticipantesCambiados()
-		end
-	end)
-
-	print("[UMBRA Server] MatchmakingService iniciado en el Santuario (Lobby).")
+	print("[UMBRA Server] MatchmakingService iniciado en el Santuario (Salas Públicas e Individual).")
 end
 
+-- Construye únicamente la estética decorativa del círculo rúnico del santuario (sin detección por pisado)
 function MatchmakingService.ConstruirPlataformaFisica()
 	local contenedor = Workspace:FindFirstChild("ZonaEmparejamiento")
-	if contenedor then contenedor:Destroy() end
+	if contenedor then
+		contenedor:Destroy()
+	end
 
-	contenedor = Instance.new("Folder")
-	contenedor.Name = "ZonaEmparejamiento"
-	contenedor.Parent = Workspace
+	local folder = Instance.new("Folder")
+	folder.Name = "ZonaEmparejamiento"
+	folder.Parent = Workspace
 
 	-- Círculo base de piedra
 	local base = Instance.new("Part")
@@ -100,7 +118,7 @@ function MatchmakingService.ConstruirPlataformaFisica()
 	base.Material = Enum.Material.Cobblestone
 	base.Anchored = true
 	base.CanCollide = true
-	base.Parent = contenedor
+	base.Parent = folder
 	MatchmakingService.PlataformaVisual = base
 
 	-- Anillo de runas luminosas (Neon púrpura)
@@ -114,7 +132,7 @@ function MatchmakingService.ConstruirPlataformaFisica()
 	anillo.Transparency = 0.45
 	anillo.Anchored = true
 	anillo.CanCollide = false
-	anillo.Parent = contenedor
+	anillo.Parent = folder
 
 	local luz = Instance.new("PointLight")
 	luz.Color = Color3.fromRGB(160, 60, 255)
@@ -122,7 +140,7 @@ function MatchmakingService.ConstruirPlataformaFisica()
 	luz.Brightness = 2.0
 	luz.Parent = anillo
 
-	-- 4 Pads de espera individuales alrededor del círculo
+	-- 4 Pads decorativos alrededor del círculo
 	for i = 1, 4 do
 		local ang = (i - 1) * (math.pi * 2 / 4)
 		local px = MatchmakingService.PosicionCirculo.X + math.cos(ang) * 7.5
@@ -137,10 +155,10 @@ function MatchmakingService.ConstruirPlataformaFisica()
 		pad.Transparency = 0.35
 		pad.Anchored = true
 		pad.CanCollide = false
-		pad.Parent = contenedor
+		pad.Parent = folder
 	end
 
-	-- Cartel Holográfico suspendido
+	-- Cartel Holográfico decorativo suspendido
 	local soporteHolo = Instance.new("Part")
 	soporteHolo.Name = "SoporteHolograma"
 	soporteHolo.Size = Vector3.new(1, 1, 1)
@@ -148,11 +166,11 @@ function MatchmakingService.ConstruirPlataformaFisica()
 	soporteHolo.Transparency = 1
 	soporteHolo.Anchored = true
 	soporteHolo.CanCollide = false
-	soporteHolo.Parent = contenedor
+	soporteHolo.Parent = folder
 
 	local billboard = Instance.new("BillboardGui")
-	billboard.Name = "BillboardEmparejamiento"
-	billboard.Size = UDim2.new(0, 340, 0, 100)
+	billboard.Name = "BillboardSantuario"
+	billboard.Size = UDim2.new(0, 340, 0, 82)
 	billboard.StudsOffset = Vector3.new(0, 2, 0)
 	billboard.AlwaysOnTop = true
 	billboard.MaxDistance = 100
@@ -178,269 +196,356 @@ function MatchmakingService.ConstruirPlataformaFisica()
 
 	local titulo = Instance.new("TextLabel")
 	titulo.Name = "Titulo"
-	titulo.Size = UDim2.new(1, 0, 0, 26)
-	titulo.Position = UDim2.new(0, 0, 0, 6)
+	titulo.Size = UDim2.new(1, 0, 0, 34)
+	titulo.Position = UDim2.new(0, 0, 0, 10)
 	titulo.BackgroundTransparency = 1
 	titulo.TextColor3 = Color3.fromRGB(240, 220, 255)
 	titulo.Font = Enum.Font.GothamBlack
 	titulo.TextSize = 16
-	titulo.Text = "PORTAL DE EXPEDICIÓN"
+	titulo.Text = "SANTUARIO DE LA ÚLTIMA LUZ"
 	titulo.Parent = frame
 
-	local txtContador = Instance.new("TextLabel")
-	txtContador.Name = "TextoContador"
-	txtContador.Size = UDim2.new(1, 0, 0, 28)
-	txtContador.Position = UDim2.new(0, 0, 0, 34)
-	txtContador.BackgroundTransparency = 1
-	txtContador.TextColor3 = Color3.fromRGB(80, 240, 255)
-	txtContador.Font = Enum.Font.GothamBlack
-	txtContador.TextSize = 20
-	txtContador.Text = "JUGADORES: 0 / 4"
-	txtContador.Parent = frame
-	MatchmakingService.TextoContador = txtContador
-
-	local txtTiempo = Instance.new("TextLabel")
-	txtTiempo.Name = "TextoTiempo"
-	txtTiempo.Size = UDim2.new(1, 0, 0, 22)
-	txtTiempo.Position = UDim2.new(0, 0, 0, 64)
-	txtTiempo.BackgroundTransparency = 1
-	txtTiempo.TextColor3 = Color3.fromRGB(180, 160, 220)
-	txtTiempo.Font = Enum.Font.GothamBold
-	txtTiempo.TextSize = 13
-	txtTiempo.Text = "Pisa el círculo para unirte"
-	txtTiempo.Parent = frame
-	MatchmakingService.TextoTiempo = txtTiempo
+	local subtitulo = Instance.new("TextLabel")
+	subtitulo.Name = "Subtitulo"
+	subtitulo.Size = UDim2.new(1, 0, 0, 24)
+	subtitulo.Position = UDim2.new(0, 0, 0, 44)
+	subtitulo.BackgroundTransparency = 1
+	subtitulo.TextColor3 = Color3.fromRGB(170, 215, 255)
+	subtitulo.Font = Enum.Font.GothamMedium
+	subtitulo.TextSize = 12
+	subtitulo.Text = "Zona segura — Usa el panel de expedición"
+	subtitulo.Parent = frame
 end
 
-function MatchmakingService.ActualizarDeteccion()
-	local posCentro = MatchmakingService.PosicionCirculo
-	local radio = MatchmakingService.RadioCirculo
-	local huboCambio = false
+function MatchmakingService.ConstruirEstadoSala(sala: SalaInterna, mensajeAlerta: string?): TiposAlpha.EstadoSalaCooperativa
+	local participantesInfo: { TiposAlpha.ParticipanteSalaInfo } = {}
+	for _, p in sala.Participantes do
+		table.insert(participantesInfo, {
+			UserId = p.UserId,
+			Nombre = p.Nombre,
+			EsResponsable = p.UserId == sala.ResponsableUserId,
+			Estado = if p.Player:IsDescendantOf(Players) then p.Estado else "Ausente",
+			OrdenLlegada = p.OrdenLlegada,
+		})
+	end
 
-	for _, player in Players:GetPlayers() do
-		local character = player.Character
-		if character then
-			local root = character:FindFirstChild("HumanoidRootPart") :: BasePart?
-			local humanoid = character:FindFirstChildOfClass("Humanoid")
-			if root and humanoid and humanoid.Health > 0 then
-				local distXZ = (Vector3.new(root.Position.X, posCentro.Y, root.Position.Z) - posCentro).Magnitude
-				local adentro = distXZ <= radio
+	return {
+		SalaId = sala.SalaId,
+		ResponsableUserId = sala.ResponsableUserId,
+		PlazasOcupadas = #sala.Participantes,
+		CapacidadMaxima = sala.CapacidadMaxima,
+		Cerrada = sala.Cerrada,
+		IniciandoExpedicion = sala.IniciandoExpedicion,
+		Participantes = participantesInfo,
+		MensajeAlerta = mensajeAlerta,
+	}
+end
 
-				if adentro and not MatchmakingService.Participantes[player] then
-					local totalActual = MatchmakingService.ObtenerTotalParticipantes()
-					if totalActual < MatchmakingService.MaxJugadores then
-						MatchmakingService.Participantes[player] = true
-						huboCambio = true
-						print(string.format("[Matchmaking] %s entró al portal de expedición.", player.Name))
-					end
-				elseif not adentro and MatchmakingService.Participantes[player] then
-					MatchmakingService.Participantes[player] = nil
-					huboCambio = true
-					print(string.format("[Matchmaking] %s salió del portal de expedición.", player.Name))
-				end
-			end
-		else
-			if MatchmakingService.Participantes[player] then
-				MatchmakingService.Participantes[player] = nil
-				huboCambio = true
-			end
+function MatchmakingService.SincronizarSalaConParticipantes(sala: SalaInterna, mensajeAlerta: string?)
+	if not MatchmakingService.RemoteSincronizarSala then return end
+	local estado = MatchmakingService.ConstruirEstadoSala(sala, mensajeAlerta)
+	for _, p in sala.Participantes do
+		if p.Player and p.Player:IsDescendantOf(Players) then
+			MatchmakingService.RemoteSincronizarSala:FireClient(p.Player, estado)
 		end
 	end
+end
 
-	if huboCambio then
-		MatchmakingService.OnParticipantesCambiados()
+function MatchmakingService.NotificarFueraDeSala(player: Player, mensajeAlerta: string?)
+	if not MatchmakingService.RemoteSincronizarSala then return end
+	if player and player:IsDescendantOf(Players) then
+		MatchmakingService.RemoteSincronizarSala:FireClient(player, nil, mensajeAlerta)
 	end
 end
 
-function MatchmakingService.ObtenerTotalParticipantes(): number
-	local count = 0
-	for _ in MatchmakingService.Participantes do
-		count += 1
-	end
-	return count
+function MatchmakingService.ValidarPlaceExpedicion(): boolean
+	return PlacesConfig.ExpeditionPlaceId > 0 and PlacesConfig.ExpeditionPlaceId ~= PlacesConfig.LobbyPlaceId
 end
 
-function MatchmakingService.OnParticipantesCambiados()
-	local total = MatchmakingService.ObtenerTotalParticipantes()
+function MatchmakingService.ProcesarAccionLobby(player: Player, accion: any)
+	if not player or not player:IsDescendantOf(Players) then return end
+	if not PlacesConfig.EsLobby() then return end
 
-	if total == 0 then
-		MatchmakingService.CancelarCuentaAtras()
-	elseif total >= 4 then
-		-- Si se llena el cupo (4/4), acelerar inicio a 3 segundos
-		if not MatchmakingService.CuentaActiva or MatchmakingService.SegundosRestantes > 3 then
-			MatchmakingService.SegundosRestantes = 3
-			MatchmakingService.IniciarCuentaAtras()
-		end
-	elseif total >= 1 and not MatchmakingService.CuentaActiva then
-		MatchmakingService.SegundosRestantes = MatchmakingService.TiempoCuentaAtras
-		MatchmakingService.IniciarCuentaAtras()
+	if accion == "IniciarIndividual" then
+		MatchmakingService.IniciarExpedicionIndividual(player)
+	elseif accion == "BuscarCoop" then
+		MatchmakingService.BuscarOUnirseSalaCoop(player)
+	elseif accion == "AbandonarSala" then
+		MatchmakingService.RetirarJugadorDeSala(player, false)
+	elseif accion == "IniciarExpedicionSala" then
+		MatchmakingService.IniciarExpedicionSala(player)
+	else
+		warn(string.format("[Matchmaking] Acción de lobby desconocida '%s' enviada por %s.", tostring(accion), player.Name))
 	end
-
-	MatchmakingService.NotificarEstado()
 end
 
-function MatchmakingService.IniciarCuentaAtras()
-	if MatchmakingService.CuentaActiva and MatchmakingService.HiloCuenta then return end
-	MatchmakingService.CuentaActiva = true
+function MatchmakingService.IniciarExpedicionIndividual(player: Player)
+	if MatchmakingService.JugadoresTeletransportando[player] then return end
 
-	MatchmakingService.HiloCuenta = task.spawn(function()
-		while MatchmakingService.CuentaActiva and MatchmakingService.SegundosRestantes > 0 do
-			MatchmakingService.NotificarEstado()
-			task.wait(1)
-			if not MatchmakingService.CuentaActiva then break end
-			MatchmakingService.SegundosRestantes -= 1
-		end
+	-- Si el jugador estaba en una sala cooperativa, retirarlo limpiamente primero
+	MatchmakingService.RetirarJugadorDeSala(player, false)
 
-		if MatchmakingService.CuentaActiva and MatchmakingService.SegundosRestantes <= 0 then
-			MatchmakingService.TransportarParticipantes()
-		end
-	end)
-end
-
-function MatchmakingService.CancelarCuentaAtras()
-	MatchmakingService.CuentaActiva = false
-	if MatchmakingService.HiloCuenta and MatchmakingService.HiloCuenta ~= coroutine.running() then
-		task.cancel(MatchmakingService.HiloCuenta)
-	end
-	MatchmakingService.HiloCuenta = nil
-	MatchmakingService.SegundosRestantes = MatchmakingService.TiempoCuentaAtras
-	MatchmakingService.NotificarEstado()
-	print("[Matchmaking] Portal vacío. Cuenta regresiva cancelada.")
-end
-
-function MatchmakingService.TransportarParticipantes()
-	MatchmakingService.CuentaActiva = false
-	if MatchmakingService.HiloCuenta and MatchmakingService.HiloCuenta ~= coroutine.running() then
-		task.cancel(MatchmakingService.HiloCuenta)
-	end
-	MatchmakingService.HiloCuenta = nil
-
-	local lista = {}
-	for player in MatchmakingService.Participantes do
-		table.insert(lista, player)
-	end
-
-	if #lista == 0 then
-		MatchmakingService.CancelarCuentaAtras()
+	if not MatchmakingService.ValidarPlaceExpedicion() then
+		warn("[Matchmaking] BLOQUEADO: ExpeditionPlaceId no configurado en PlacesConfig.")
+		MatchmakingService.NotificarFueraDeSala(player, "El Place de Expedición no está configurado en PlacesConfig.")
 		return
 	end
 
-	-- COMPROBACIÓN ESTRICTA DEL DESTINO:
-	-- No simular teletransportes en el mismo lugar ni inventar PlaceIds.
-	if PlacesConfig.ExpeditionPlaceId <= 0 or PlacesConfig.ExpeditionPlaceId == PlacesConfig.LobbyPlaceId then
-		warn("[Matchmaking] ==========================================================================")
-		warn("[Matchmaking] BLOQUEADO: El Place de Expedición todavía no está configurado.")
-		warn(string.format("[Matchmaking] PlaceId actual del Lobby: %d | ExpeditionPlaceId configurado: %d", PlacesConfig.LobbyPlaceId, PlacesConfig.ExpeditionPlaceId))
-		warn("[Matchmaking] Se requiere crear un segundo Place en la experiencia y registrar su PlaceId real en PlacesConfig.luau.")
-		warn("[Matchmaking] ==========================================================================")
+	MatchmakingService.JugadoresTeletransportando[player] = true
+	print(string.format("[Matchmaking] Iniciando expedición individual para %s...", player.Name))
 
-		MatchmakingService.MostrarAlerta(
-			"EXPEDICIÓN PENDIENTE (FALTA PLACE ID)",
-			"No se puede teletransportar: el Place de supervivencia no está configurado en PlacesConfig."
-		)
-		MatchmakingService.CancelarCuentaAtras()
-		table.clear(MatchmakingService.Participantes)
-		MatchmakingService.NotificarEstado()
-		return
-	end
-
-	-- Evitar ejecuciones duplicadas de teletransporte
-	if MatchmakingService.TeletransporteEnProgreso then
-		return
-	end
-	MatchmakingService.TeletransporteEnProgreso = true
-
-	print(string.format("[Matchmaking] Iniciando teletransporte de %d jugadores hacia el Place %d...", #lista, PlacesConfig.ExpeditionPlaceId))
-
-	-- Iniciar teletransporte autoritativo a un servidor reservado del Place de Expedición
 	task.spawn(function()
 		local exitoReserva, codigoAccesoOErr = pcall(function()
 			return TeleportService:ReserveServer(PlacesConfig.ExpeditionPlaceId)
 		end)
 
 		if not exitoReserva then
-			warn(string.format("[Matchmaking] Error al reservar servidor para Place %d: %s", PlacesConfig.ExpeditionPlaceId, tostring(codigoAccesoOErr)))
-			MatchmakingService.MostrarAlerta("ERROR DE RESERVA", "No fue posible crear el servidor de expedición.")
-			MatchmakingService.TeletransporteEnProgreso = false
-			MatchmakingService.CancelarCuentaAtras()
+			warn(string.format("[Matchmaking] Error al reservar servidor individual para %s: %s", player.Name, tostring(codigoAccesoOErr)))
+			MatchmakingService.JugadoresTeletransportando[player] = nil
+			MatchmakingService.NotificarFueraDeSala(player, "No fue posible reservar el servidor de expedición.")
 			return
 		end
 
 		local options = Instance.new("TeleportOptions")
 		options.ReservedServerAccessCode = codigoAccesoOErr
+		options:SetTeleportData({
+			ModoExpedicion = "Solo",
+			JugadoresEsperados = { player.UserId },
+			ReservedServerAccessCode = codigoAccesoOErr,
+		})
+
+		if ReconnectionService and typeof(ReconnectionService.RegistrarSesionEnMemoryStore) == "function" then
+			ReconnectionService.RegistrarSesionEnMemoryStore({ player.UserId }, codigoAccesoOErr, "Solo")
+		end
 
 		local exitoTP, errTP = pcall(function()
-			TeleportService:TeleportAsync(PlacesConfig.ExpeditionPlaceId, lista, options)
+			TeleportService:TeleportAsync(PlacesConfig.ExpeditionPlaceId, { player }, options)
 		end)
 
 		if not exitoTP then
-			warn(string.format("[Matchmaking] Error en TeleportService: %s", tostring(errTP)))
-			MatchmakingService.MostrarAlerta("FALLO DE TELETRANSPORTE", tostring(errTP))
+			warn(string.format("[Matchmaking] Error en TeleportAsync individual para %s: %s", player.Name, tostring(errTP)))
+			MatchmakingService.JugadoresTeletransportando[player] = nil
+			MatchmakingService.NotificarFueraDeSala(player, "Error al teletransportar: " .. tostring(errTP))
 		else
-			print("[Matchmaking] Teletransporte enviado con éxito.")
-		end
-
-		table.clear(MatchmakingService.Participantes)
-		MatchmakingService.TeletransporteEnProgreso = false
-		MatchmakingService.NotificarEstado()
-	end)
-end
-
-function MatchmakingService.MostrarAlerta(textoHolo: string, mensajeClient: string)
-	if MatchmakingService.TextoTiempo then
-		MatchmakingService.TextoTiempo.Text = textoHolo
-		MatchmakingService.TextoTiempo.TextColor3 = Color3.fromRGB(255, 70, 70)
-	end
-
-	if MatchmakingService.RemotePortal then
-		MatchmakingService.RemotePortal:FireAllClients({
-			Total = MatchmakingService.ObtenerTotalParticipantes(),
-			Maximo = MatchmakingService.MaxJugadores,
-			CuentaAtras = MatchmakingService.SegundosRestantes,
-			CuentaActiva = false,
-			MensajeAlerta = mensajeClient,
-		})
-	end
-
-	task.delay(5, function()
-		if not MatchmakingService.CuentaActiva and MatchmakingService.TextoTiempo then
-			MatchmakingService.TextoTiempo.Text = "Pisa el círculo para unirte"
-			MatchmakingService.TextoTiempo.TextColor3 = Color3.fromRGB(180, 160, 220)
+			print(string.format("[Matchmaking] Teletransporte individual enviado para %s.", player.Name))
 		end
 	end)
 end
 
-function MatchmakingService.NotificarEstado()
-	local total = MatchmakingService.ObtenerTotalParticipantes()
+function MatchmakingService.BuscarOUnirseSalaCoop(player: Player)
+	if MatchmakingService.JugadoresTeletransportando[player] then return end
 
-	if MatchmakingService.TextoContador then
-		MatchmakingService.TextoContador.Text = string.format("JUGADORES: %d / %d", total, MatchmakingService.MaxJugadores)
-		if total == 4 then
-			MatchmakingService.TextoContador.TextColor3 = Color3.fromRGB(100, 255, 140)
-		else
-			MatchmakingService.TextoContador.TextColor3 = Color3.fromRGB(80, 240, 255)
+	-- Si ya está en una sala, re-sincronizar su estado actual
+	local salaIdActual = MatchmakingService.SalaPorJugador[player]
+	if salaIdActual and MatchmakingService.SalasActivas[salaIdActual] then
+		MatchmakingService.SincronizarSalaConParticipantes(MatchmakingService.SalasActivas[salaIdActual])
+		return
+	end
+
+	-- Buscar sala abierta con mayor número de jugadores actuales; empate: menor TiempoCreacion
+	local mejorSala: SalaInterna? = nil
+	for _, sala in MatchmakingService.SalasActivas do
+		if not sala.Cerrada and not sala.IniciandoExpedicion and #sala.Participantes < sala.CapacidadMaxima then
+			if not mejorSala then
+				mejorSala = sala
+			else
+				local cantNueva = #sala.Participantes
+				local cantMejor = #mejorSala.Participantes
+				if cantNueva > cantMejor or (cantNueva == cantMejor and sala.TiempoCreacion < mejorSala.TiempoCreacion) then
+					mejorSala = sala
+				end
+			end
 		end
 	end
 
-	if MatchmakingService.TextoTiempo then
-		if MatchmakingService.CuentaActiva then
-			MatchmakingService.TextoTiempo.Text = string.format("INICIANDO EN %d SEGUNDOS...", MatchmakingService.SegundosRestantes)
-			MatchmakingService.TextoTiempo.TextColor3 = Color3.fromRGB(255, 220, 80)
-		else
-			MatchmakingService.TextoTiempo.Text = "Pisa el círculo para unirte"
-			MatchmakingService.TextoTiempo.TextColor3 = Color3.fromRGB(180, 160, 220)
-		end
-	end
-
-	if MatchmakingService.RemotePortal then
-		MatchmakingService.RemotePortal:FireAllClients({
-			Total = total,
-			Maximo = MatchmakingService.MaxJugadores,
-			CuentaAtras = MatchmakingService.SegundosRestantes,
-			CuentaActiva = MatchmakingService.CuentaActiva,
-			MensajeAlerta = nil,
+	if mejorSala then
+		table.insert(mejorSala.Participantes, {
+			Player = player,
+			UserId = player.UserId,
+			Nombre = player.Name,
+			Estado = "Conectado",
+			OrdenLlegada = mejorSala.SiguienteOrden,
 		})
+		mejorSala.SiguienteOrden += 1
+		MatchmakingService.SalaPorJugador[player] = mejorSala.SalaId
+		print(string.format("[Matchmaking] %s se unió a la sala pública %s (%d/%d).",
+			player.Name, mejorSala.SalaId, #mejorSala.Participantes, mejorSala.CapacidadMaxima))
+		MatchmakingService.SincronizarSalaConParticipantes(mejorSala)
+	else
+		-- Crear nueva sala pública asignando al jugador como creador y responsable
+		MatchmakingService.ContadorSalas += 1
+		local nuevaSalaId = string.format("SALA_%d", MatchmakingService.ContadorSalas)
+		local nuevaSala: SalaInterna = {
+			SalaId = nuevaSalaId,
+			TiempoCreacion = os.clock(),
+			ResponsableUserId = player.UserId,
+			CapacidadMaxima = MatchmakingService.MaxJugadores,
+			Cerrada = false,
+			IniciandoExpedicion = false,
+			SiguienteOrden = 2,
+			Participantes = {
+				{
+					Player = player,
+					UserId = player.UserId,
+					Nombre = player.Name,
+					Estado = "Conectado",
+					OrdenLlegada = 1,
+				},
+			},
+		}
+		MatchmakingService.SalasActivas[nuevaSalaId] = nuevaSala
+		MatchmakingService.SalaPorJugador[player] = nuevaSalaId
+		print(string.format("[Matchmaking] %s creó nueva sala pública %s (Responsable).", player.Name, nuevaSalaId))
+		MatchmakingService.SincronizarSalaConParticipantes(nuevaSala)
 	end
+end
+
+function MatchmakingService.RetirarJugadorDeSala(player: Player, porDesconexion: boolean)
+	local salaId = MatchmakingService.SalaPorJugador[player]
+	if not salaId then
+		if not porDesconexion then
+			MatchmakingService.NotificarFueraDeSala(player, nil)
+		end
+		return
+	end
+
+	MatchmakingService.SalaPorJugador[player] = nil
+	local sala = MatchmakingService.SalasActivas[salaId]
+	if not sala then
+		if not porDesconexion then
+			MatchmakingService.NotificarFueraDeSala(player, nil)
+		end
+		return
+	end
+
+	for idx, p in sala.Participantes do
+		if p.Player == player or p.UserId == player.UserId then
+			table.remove(sala.Participantes, idx)
+			break
+		end
+	end
+
+	if not porDesconexion then
+		MatchmakingService.NotificarFueraDeSala(player, nil)
+	end
+
+	if #sala.Participantes == 0 then
+		MatchmakingService.SalasActivas[salaId] = nil
+		print(string.format("[Matchmaking] Sala %s destruida al quedar vacía.", salaId))
+		return
+	end
+
+	-- Sucesión automática de autoridad: pasa al jugador con menor OrdenLlegada
+	if player.UserId == sala.ResponsableUserId then
+		local sucesor = sala.Participantes[1]
+		for _, p in sala.Participantes do
+			if p.OrdenLlegada < sucesor.OrdenLlegada then
+				sucesor = p
+			end
+		end
+		sala.ResponsableUserId = sucesor.UserId
+		print(string.format("[Matchmaking] Sucesión en sala %s: nuevo responsable %s (UserId: %d).",
+			salaId, sucesor.Nombre, sucesor.UserId))
+	end
+
+	MatchmakingService.SincronizarSalaConParticipantes(sala)
+end
+
+function MatchmakingService.IniciarExpedicionSala(player: Player)
+	local salaId = MatchmakingService.SalaPorJugador[player]
+	if not salaId then return end
+
+	local sala = MatchmakingService.SalasActivas[salaId]
+	if not sala then return end
+
+	-- Validación autoritativa estricta: solo el responsable actual puede iniciar
+	if player.UserId ~= sala.ResponsableUserId then
+		warn(string.format("[Matchmaking] %s intentó iniciar la sala %s sin ser el responsable.", player.Name, salaId))
+		return
+	end
+
+	if sala.IniciandoExpedicion then return end
+
+	if not MatchmakingService.ValidarPlaceExpedicion() then
+		warn("[Matchmaking] BLOQUEADO: ExpeditionPlaceId no configurado en PlacesConfig.")
+		MatchmakingService.SincronizarSalaConParticipantes(sala, "El Place de Expedición no está configurado en PlacesConfig.")
+		return
+	end
+
+	local listaJugadores: { Player } = {}
+	local listaUserIds: { number } = {}
+	for _, p in sala.Participantes do
+		if p.Player and p.Player:IsDescendantOf(Players) then
+			table.insert(listaJugadores, p.Player)
+			table.insert(listaUserIds, p.UserId)
+		end
+	end
+
+	if #listaJugadores == 0 then
+		MatchmakingService.SalasActivas[salaId] = nil
+		return
+	end
+
+	-- Cerrar la sala inmediatamente a nuevos participantes
+	sala.Cerrada = true
+	sala.IniciandoExpedicion = true
+	for _, p in listaJugadores do
+		MatchmakingService.JugadoresTeletransportando[p] = true
+	end
+	MatchmakingService.SincronizarSalaConParticipantes(sala)
+
+	print(string.format("[Matchmaking] Responsable %s inició expedición cooperativa de sala %s (%d jugadores).",
+		player.Name, salaId, #listaJugadores))
+
+	task.spawn(function()
+		local exitoReserva, codigoAccesoOErr = pcall(function()
+			return TeleportService:ReserveServer(PlacesConfig.ExpeditionPlaceId)
+		end)
+
+		if not exitoReserva then
+			warn(string.format("[Matchmaking] Error al reservar servidor para sala %s: %s", salaId, tostring(codigoAccesoOErr)))
+			sala.Cerrada = false
+			sala.IniciandoExpedicion = false
+			for _, p in listaJugadores do
+				MatchmakingService.JugadoresTeletransportando[p] = nil
+			end
+			MatchmakingService.SincronizarSalaConParticipantes(sala, "Error al reservar servidor de expedición.")
+			return
+		end
+
+		local options = Instance.new("TeleportOptions")
+		options.ReservedServerAccessCode = codigoAccesoOErr
+		options:SetTeleportData({
+			ModoExpedicion = "Coop",
+			SalaId = sala.SalaId,
+			JugadoresEsperados = listaUserIds,
+			ReservedServerAccessCode = codigoAccesoOErr,
+		})
+
+		if ReconnectionService and typeof(ReconnectionService.RegistrarSesionEnMemoryStore) == "function" then
+			ReconnectionService.RegistrarSesionEnMemoryStore(listaUserIds, codigoAccesoOErr, "Coop")
+		end
+
+		local exitoTP, errTP = pcall(function()
+			TeleportService:TeleportAsync(PlacesConfig.ExpeditionPlaceId, listaJugadores, options)
+		end)
+
+		if not exitoTP then
+			warn(string.format("[Matchmaking] Error en TeleportAsync para sala %s: %s", salaId, tostring(errTP)))
+			sala.Cerrada = false
+			sala.IniciandoExpedicion = false
+			for _, p in listaJugadores do
+				MatchmakingService.JugadoresTeletransportando[p] = nil
+			end
+			MatchmakingService.SincronizarSalaConParticipantes(sala, "Fallo al teletransportar la sala: " .. tostring(errTP))
+		else
+			print(string.format("[Matchmaking] Teletransporte cooperativo de sala %s despachado con éxito.", salaId))
+			for _, p in listaJugadores do
+				MatchmakingService.SalaPorJugador[p] = nil
+			end
+			MatchmakingService.SalasActivas[salaId] = nil
+		end
+	end)
 end
 
 return MatchmakingService

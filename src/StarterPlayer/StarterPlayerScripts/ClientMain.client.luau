@@ -23,6 +23,7 @@ local ControllersFolder = PlayerScripts:WaitForChild("Controllers")
 local CameraController = require(ControllersFolder:WaitForChild("CameraController") :: ModuleScript)
 local InputController = require(ControllersFolder:WaitForChild("InputController") :: ModuleScript)
 local HUDController = require(ControllersFolder:WaitForChild("HUDController") :: ModuleScript)
+local OrbVisualController = require(ControllersFolder:WaitForChild("OrbVisualController") :: ModuleScript)
 
 print("=========================================")
 print(string.format("[UMBRA Client] Iniciando sesión para: %s en %s", localPlayer.Name, if PlacesConfig.EsLobby() then "LOBBY" else "EXPEDICIÓN"))
@@ -34,9 +35,11 @@ local EstadoActual = "Waiting"
 HUDController.Iniciar()
 InputController.Iniciar()
 
--- En el Lobby, asegurar cámara libre de tercera persona
+-- En el Lobby, asegurar cámara libre de tercera persona; en Expedición, iniciar orbes visuales
 if PlacesConfig.EsLobby() then
 	CameraController.Detener()
+else
+	OrbVisualController.Iniciar()
 end
 
 -- 3. Escuchar cambios de estado autoritativos desde el Servidor
@@ -53,11 +56,21 @@ if remotesFolder then
 
 			if nuevoEstado == "Playing" and not PlacesConfig.EsLobby() then
 				CameraController.Iniciar()
+			elseif nuevoEstado == "Victory" then
+				print("[UMBRA Client] Partida finalizada. ¡Victoria de la expedición!")
 			elseif nuevoEstado == "GameOver" then
 				print("[UMBRA Client] Partida finalizada. Superviviente derrotado.")
 			elseif nuevoEstado == "Waiting" or PlacesConfig.EsLobby() then
 				CameraController.Detener()
 			end
+		end)
+	end
+
+	-- Escuchar reloj lógico sincronizado de la expedición
+	local remoteReloj = remotesFolder:WaitForChild("SincronizarRelojExpedicion", 5) :: RemoteEvent?
+	if remoteReloj and remoteReloj:IsA("RemoteEvent") then
+		remoteReloj.OnClientEvent:Connect(function(datos: any)
+			HUDController.ActualizarRelojExpedicion(datos)
 		end)
 	end
 
@@ -75,6 +88,14 @@ if remotesFolder then
 	if remoteSupervivientes and remoteSupervivientes:IsA("RemoteEvent") then
 		remoteSupervivientes.OnClientEvent:Connect(function(lista: any)
 			HUDController.ActualizarSupervivientes(lista)
+		end)
+	end
+
+	-- Escuchar progresión individual (nivel, XP y tarjetas de mejora)
+	local remoteProgresion = remotesFolder:WaitForChild("SincronizarProgresion", 5) :: RemoteEvent?
+	if remoteProgresion and remoteProgresion:IsA("RemoteEvent") then
+		remoteProgresion.OnClientEvent:Connect(function(datos: any)
+			HUDController.ActualizarProgresion(datos)
 		end)
 	end
 end

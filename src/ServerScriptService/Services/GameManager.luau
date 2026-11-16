@@ -6,19 +6,25 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local TeleportService = game:GetService("TeleportService")
 
 local ConfigFolder = ReplicatedStorage:WaitForChild("Config")
+local ModulesFolder = ReplicatedStorage:WaitForChild("Modules")
 local PlacesConfig = require(ConfigFolder:WaitForChild("PlacesConfig") :: ModuleScript)
+local DevTestConfig = require(ConfigFolder:WaitForChild("DevTestConfig") :: ModuleScript)
+local OleadasConfig = require(ConfigFolder:WaitForChild("OleadasConfig") :: ModuleScript)
+local TiposAlpha = require(ModulesFolder:WaitForChild("TiposAlpha") :: ModuleScript)
 
-export type EstadoPartida = "Waiting" | "Starting" | "Playing" | "GameOver" | "ReturningToLobby"
-export type EstadoJugador = "Alive" | "Dead" | "Spectating" | "ReturningToLobby" | "Returned"
-export type ModoExpedicion = "Solo" | "Coop"
+export type EstadoPartida = TiposAlpha.EstadoPartida
+export type EstadoJugador = TiposAlpha.EstadoJugador
+export type ModoExpedicion = TiposAlpha.ModoExpedicion
 
 local TRANSICIONES_VALIDAS: { [EstadoPartida]: { [EstadoPartida]: boolean } } = {
 	Waiting = { Starting = true, Playing = true },
 	Starting = { Playing = true, Waiting = true },
-	Playing = { GameOver = true, ReturningToLobby = true, Waiting = true },
+	Playing = { Victory = true, GameOver = true, ReturningToLobby = true, Waiting = true },
+	Victory = { ReturningToLobby = true, Waiting = true },
 	GameOver = { ReturningToLobby = true, Waiting = true },
 	ReturningToLobby = { Waiting = true },
 }
@@ -26,29 +32,52 @@ local TRANSICIONES_VALIDAS: { [EstadoPartida]: { [EstadoPartida]: boolean } } = 
 local GameManager = {
 	EstadoActual = "Waiting" :: EstadoPartida,
 	ModoExpedicion = "Solo" :: ModoExpedicion, -- Inmutable una vez comenzada la expedición
+	ModoAutoritativoTeleport = nil :: ModoExpedicion?,
 	JugadoresConectados = {} :: { [Player]: boolean },
 	JugadoresVivos = {} :: { [Player]: boolean },
 	EstadosJugadores = {} :: { [Player]: EstadoJugador },
+	ParticipantesEquipo = {} :: { [number]: TiposAlpha.MiembroEquipoEspectador },
+	TiempoMuerteJugador = {} :: { [Player]: number },
+	EstadisticasFinalesJugador = {} :: { [Player]: any },
+	NivelesFinalesJugador = {} :: { [Player]: number },
 	ConexionesPersonajes = {} :: { [Player]: { RBXScriptConnection } },
 	TransicionEnProgreso = false,
 	RetornoEnProgreso = false,
 	IntentosRetorno = 0,
 	MaxIntentosRetorno = 2,
+	-- Reloj lógico de expedición (Sección 15)
+	TiempoLogicoSegundos = 0,
+	DuracionObjetivoSegundos = DevTestConfig.DuracionExpedicionNormalSegundos,
+	MultiplicadorTiempo = DevTestConfig.MultiplicadorPorDefecto,
+	ModoAceleradoActivo = false,
+	UltimoTiempoSync = 0,
+	UltimoSyncEquipo = 0,
+	MinutoLogicoPrevio = 0,
+	ConexionRelojHeartbeat = nil :: RBXScriptConnection?,
 	ConexionTeleportInitFailed = nil :: RBXScriptConnection?,
 	RemoteSincronizar = nil :: RemoteEvent?,
 	RemoteEstadoIndividual = nil :: RemoteEvent?,
 	RemoteSolicitarRetorno = nil :: RemoteEvent?,
 	RemoteSupervivientes = nil :: RemoteEvent?,
+	RemoteSincronizarReloj = nil :: RemoteEvent?,
+	RemoteComandoDev = nil :: RemoteEvent?,
+	RemoteResultados = nil :: RemoteEvent?,
 	SpawnerService = nil :: any,
 	EnemyService = nil :: any,
 	CombatService = nil :: any,
+	ProgressionService = nil :: any,
+	BossService = nil :: any,
+	ReconnectionService = nil :: any,
 }
 
--- Vinculación de servicios de combate y hordas para control autoritativo
-function GameManager.VincularServicios(spawnerRef: any, enemyRef: any, combatRef: any)
+-- Vinculación de servicios de combate, progresión, jefe, reconexión y hordas para control autoritativo
+function GameManager.VincularServicios(spawnerRef: any, enemyRef: any, combatRef: any, progressionRef: any?, bossRef: any?, reconnectionRef: any?)
 	GameManager.SpawnerService = spawnerRef
 	GameManager.EnemyService = enemyRef
 	GameManager.CombatService = combatRef
+	GameManager.ProgressionService = progressionRef
+	GameManager.BossService = bossRef
+	GameManager.ReconnectionService = reconnectionRef
 end
 
 -- Inicializa el servicio y localiza canales de comunicación
@@ -74,16 +103,51 @@ function GameManager.Iniciar()
 	GameManager.RemoteEstadoIndividual = asegurarRemote("SincronizarEstadoIndividual")
 	GameManager.RemoteSolicitarRetorno = asegurarRemote("SolicitarRetornoIndividual")
 	GameManager.RemoteSupervivientes = asegurarRemote("ActualizarSupervivientes")
+	GameManager.RemoteSincronizarReloj = asegurarRemote("SincronizarRelojExpedicion")
+	GameManager.RemoteComandoDev = asegurarRemote("ComandoDevExpedicion")
+	GameManager.RemoteResultados = asegurarRemote("PresentarResultadosExpedicion")
 
 	-- Escuchar solicitudes autoritativas de retorno individual desde el cliente
 	GameManager.RemoteSolicitarRetorno.OnServerEvent:Connect(function(player: Player)
 		GameManager.SolicitarRetornoIndividual(player)
 	end)
 
+	-- Escuchar comandos de desarrollo con validación autoritativa estricta
+	GameManager.RemoteComandoDev.OnServerEvent:Connect(function(player: Player, accion: any, valor: any)
+		GameManager.ProcesarComandoDev(player, accion, valor)
+	end)
+
 	GameManager.EstadoActual = "Waiting"
 	GameManager.TransicionEnProgreso = false
 	GameManager.RetornoEnProgreso = false
 	GameManager.IntentosRetorno = 0
+	GameManager.TiempoLogicoSegundos = 0
+	GameManager.MultiplicadorTiempo = DevTestConfig.MultiplicadorPorDefecto
+	GameManager.ModoAceleradoActivo = false
+	GameManager.UltimoTiempoSync = 0
+	GameManager.MinutoLogicoPrevio = 0
+
+	-- Bucle autoritativo del reloj lógico de expedición
+	if not GameManager.ConexionRelojHeartbeat then
+		GameManager.ConexionRelojHeartbeat = RunService.Heartbeat:Connect(function(dt: number)
+			if not PlacesConfig.EsExpedicion() then return end
+			if GameManager.EstadoActual ~= "Playing" then return end
+
+			GameManager.TiempoLogicoSegundos += dt * GameManager.MultiplicadorTiempo
+
+			local minutoActual = math.floor(GameManager.TiempoLogicoSegundos / 60)
+			local ahora = os.clock()
+			if minutoActual ~= GameManager.MinutoLogicoPrevio or (ahora - GameManager.UltimoTiempoSync) >= 1.0 then
+				GameManager.MinutoLogicoPrevio = minutoActual
+				GameManager.SincronizarRelojConClientes()
+			end
+
+			if GameManager.ModoExpedicion == "Coop" and (ahora - GameManager.UltimoSyncEquipo) >= 0.5 then
+				GameManager.UltimoSyncEquipo = ahora
+				GameManager.NotificarSupervivientes()
+			end
+		end)
+	end
 
 	-- Registrar escucha de fallos de inicialización de teletransporte autoritativo
 	if not GameManager.ConexionTeleportInitFailed then
@@ -94,6 +158,89 @@ function GameManager.Iniciar()
 	end
 
 	print("[UMBRA Server] GameManager iniciado. Estado inicial: Waiting.")
+end
+
+-- Retorna el estado actual del reloj lógico de la expedición
+function GameManager.ObtenerEstadoReloj(): TiposAlpha.EstadoRelojExpedicion
+	return {
+		TiempoLogicoSegundos = GameManager.TiempoLogicoSegundos,
+		DuracionObjetivoSegundos = GameManager.DuracionObjetivoSegundos,
+		MultiplicadorTiempo = GameManager.MultiplicadorTiempo,
+		ModoAceleradoActivo = GameManager.ModoAceleradoActivo,
+	}
+end
+
+-- Retorna el tiempo lógico actual en segundos
+function GameManager.ObtenerTiempoLogico(): number
+	return GameManager.TiempoLogicoSegundos
+end
+
+-- Envía el estado actual del reloj lógico, oleada actual y enemigos activos a todos los clientes conectados
+function GameManager.SincronizarRelojConClientes()
+	GameManager.UltimoTiempoSync = os.clock()
+	if GameManager.RemoteSincronizarReloj then
+		local minutos = GameManager.TiempoLogicoSegundos / 60
+		local oleadaActual = #OleadasConfig
+		for idx, fase in OleadasConfig do
+			if minutos >= fase.MinutoInicio and minutos < fase.MinutoFin then
+				oleadaActual = idx
+				break
+			end
+		end
+
+		local enemigosCount = 0
+		if GameManager.EnemyService and GameManager.EnemyService.EnemigosActivos then
+			for _ in GameManager.EnemyService.EnemigosActivos do
+				enemigosCount += 1
+			end
+		end
+
+		GameManager.RemoteSincronizarReloj:FireAllClients({
+			TiempoLogicoSegundos = GameManager.TiempoLogicoSegundos,
+			MultiplicadorTiempo = GameManager.MultiplicadorTiempo,
+			ModoAceleradoActivo = GameManager.ModoAceleradoActivo,
+			OleadaActual = oleadaActual,
+			EnemigosActivosCount = enemigosCount,
+		})
+	end
+end
+
+-- Procesa solicitudes de desarrollo (Sección 15) validando permisos y entorno
+function GameManager.ProcesarComandoDev(player: Player, accion: any, valor: any)
+	if not player or not player:IsDescendantOf(Players) then
+		return
+	end
+
+	if not DevTestConfig.EsJugadorAutorizado(player) or not PlacesConfig.EsExpedicion() then
+		warn(string.format(
+			"[GameManager] ComandoDevExpedicion bloqueado para %s (UserId: %d). Sin autorización o fuera de Expedición.",
+			player.Name,
+			player.UserId
+		))
+		return
+	end
+
+	if accion == "AlternarVelocidad" then
+		if GameManager.ModoAceleradoActivo then
+			GameManager.MultiplicadorTiempo = DevTestConfig.MultiplicadorPorDefecto
+			GameManager.ModoAceleradoActivo = false
+		else
+			GameManager.MultiplicadorTiempo = DevTestConfig.MultiplicadorAcelerado
+			GameManager.ModoAceleradoActivo = true
+		end
+		print(string.format("[DEV][GameManager] %s cambió multiplicador de tiempo a x%.1f", player.Name, GameManager.MultiplicadorTiempo))
+		GameManager.SincronizarRelojConClientes()
+
+	elseif accion == "SaltarTiempo" then
+		local segundos = tonumber(valor)
+		if segundos then
+			local tiempoClamped = math.clamp(segundos, 0, GameManager.DuracionObjetivoSegundos)
+			GameManager.TiempoLogicoSegundos = tiempoClamped
+			GameManager.MinutoLogicoPrevio = math.floor(tiempoClamped / 60)
+			print(string.format("[DEV][GameManager] %s saltó el reloj lógico a %.1f segundos.", player.Name, tiempoClamped))
+			GameManager.SincronizarRelojConClientes()
+		end
+	end
 end
 
 -- Retorna el estado actual de la sesión
@@ -112,17 +259,44 @@ function GameManager.ObtenerTotalJugadoresVivos(): number
 	return totalVivos
 end
 
--- Retorna la lista de supervivientes vivos con datos públicos para modo espectador
-function GameManager.ObtenerSupervivientesVivos(): { { UserId: number, Name: string } }
-	local lista = {}
-	for player, vivo in GameManager.JugadoresVivos do
-		if vivo and player and player:IsDescendantOf(Players) then
-			table.insert(lista, {
+-- Retorna la lista completa del equipo (vivos y eliminados) con nivel y salud en tiempo real
+function GameManager.ObtenerSupervivientesVivos(): { TiposAlpha.MiembroEquipoEspectador }
+	local lista: { TiposAlpha.MiembroEquipoEspectador } = {}
+
+	-- Refrescar datos en tiempo real de jugadores conectados
+	for player, _ in GameManager.JugadoresConectados do
+		if player and player:IsDescendantOf(Players) then
+			local estaVivo = GameManager.JugadoresVivos[player] == true
+			local estado = GameManager.EstadosJugadores[player] or "Alive"
+			local nivel = if GameManager.ProgressionService and typeof(GameManager.ProgressionService.ObtenerNivelJugador) == "function"
+				then GameManager.ProgressionService.ObtenerNivelJugador(player)
+				else 1
+			local char = player.Character
+			local hum = if char then char:FindFirstChildOfClass("Humanoid") else nil
+			local saludAct = if hum and estaVivo then math.max(0, math.ceil(hum.Health)) else 0
+			local saludMax = if hum then math.max(1, math.ceil(hum.MaxHealth)) else 100
+
+			GameManager.ParticipantesEquipo[player.UserId] = {
 				UserId = player.UserId,
 				Name = player.Name,
-			})
+				Vivo = estaVivo,
+				Estado = estado,
+				Nivel = nivel,
+				SaludActual = saludAct,
+				SaludMaxima = saludMax,
+			}
 		end
 	end
+
+	for _, miembro in GameManager.ParticipantesEquipo do
+		table.insert(lista, miembro)
+	end
+	table.sort(lista, function(a, b)
+		if a.Vivo ~= b.Vivo then
+			return a.Vivo
+		end
+		return a.Name < b.Name
+	end)
 	return lista
 end
 
@@ -244,10 +418,23 @@ function GameManager.CambiarEstado(nuevoEstado: EstadoPartida): boolean
 	elseif nuevoEstado == "Playing" then
 		print("[UMBRA Server] ¡Expedición en curso! Supervivencia iniciada.")
 
+		GameManager.TiempoLogicoSegundos = 0
+		GameManager.MultiplicadorTiempo = DevTestConfig.MultiplicadorPorDefecto
+		GameManager.ModoAceleradoActivo = false
+		GameManager.MinutoLogicoPrevio = 0
+		table.clear(GameManager.TiempoMuerteJugador)
+		table.clear(GameManager.EstadisticasFinalesJugador)
+		table.clear(GameManager.NivelesFinalesJugador)
+		GameManager.SincronizarRelojConClientes()
+
 		-- Fijar autoritativamente el modo de expedición desde el inicio de la sesión
-		-- No se recalcula durante la partida para mantener coherencia si mueren o salen participantes
+		-- Prioriza TeleportData recibido desde MatchmakingService; fallback por número de jugadores en Studio
 		local totalConectados = #Players:GetPlayers()
-		GameManager.ModoExpedicion = if totalConectados > 1 then "Coop" else "Solo"
+		if GameManager.ModoAutoritativoTeleport == "Coop" or GameManager.ModoAutoritativoTeleport == "Solo" then
+			GameManager.ModoExpedicion = GameManager.ModoAutoritativoTeleport
+		else
+			GameManager.ModoExpedicion = if totalConectados > 1 then "Coop" else "Solo"
+		end
 		print(string.format("[UMBRA Server] Modo de Expedición fijado: %s (%d participantes iniciales)",
 			GameManager.ModoExpedicion, totalConectados))
 
@@ -265,17 +452,66 @@ function GameManager.CambiarEstado(nuevoEstado: EstadoPartida): boolean
 		end
 		GameManager.NotificarSupervivientes()
 
-	elseif nuevoEstado == "GameOver" then
-		print("[UMBRA Server] DERROTA: Todos los supervivientes han caído.")
+	elseif nuevoEstado == "Victory" or nuevoEstado == "GameOver" then
+		if nuevoEstado == "Victory" then
+			print("[UMBRA Server] ¡VICTORIA! La expedición ha sido completada con éxito.")
+		else
+			print("[UMBRA Server] DERROTA: Todos los supervivientes han caído.")
+		end
+
 		GameManager.RetornoEnProgreso = false
 		GameManager.IntentosRetorno = 0
+		GameManager.SincronizarRelojConClientes()
 
-		-- Actualizar estado de todos los jugadores conectados
-		for player, _ in GameManager.JugadoresConectados do
-			local est = GameManager.EstadosJugadores[player]
-			if est ~= "ReturningToLobby" and est ~= "Returned" then
-				GameManager.EstadosJugadores[player] = "Dead"
-				GameManager.NotificarEstadoIndividual(player)
+		-- Recopilar y enviar reporte individual de resultados ANTES de detener y limpiar servicios (Sección 14)
+		local resultadoStr: "VICTORIA" | "DERROTA" = if nuevoEstado == "Victory" then "VICTORIA" else "DERROTA"
+		local jefesDerrotados = if GameManager.BossService and typeof(GameManager.BossService.ObtenerJefesDerrotados) == "function"
+			then GameManager.BossService.ObtenerJefesDerrotados()
+			else 0
+		local oroPlaceholder = if nuevoEstado == "Victory"
+			then DevTestConfig.RecompensasPlaceholderAlpha.OroVictoria
+			else DevTestConfig.RecompensasPlaceholderAlpha.OroDerrota
+		local gemasPlaceholder = if nuevoEstado == "Victory"
+			then DevTestConfig.RecompensasPlaceholderAlpha.GemasVictoria
+			else DevTestConfig.RecompensasPlaceholderAlpha.GemasDerrota
+
+		if GameManager.RemoteResultados then
+			for player, _ in GameManager.JugadoresConectados do
+				if player and player:IsDescendantOf(Players) then
+					local nivel = GameManager.NivelesFinalesJugador[player]
+						or (if GameManager.ProgressionService and typeof(GameManager.ProgressionService.ObtenerNivelJugador) == "function"
+							then GameManager.ProgressionService.ObtenerNivelJugador(player)
+							else 1)
+					local statsCombate = GameManager.EstadisticasFinalesJugador[player]
+						or (if GameManager.CombatService and typeof(GameManager.CombatService.ObtenerEstadisticasCombate) == "function"
+							then GameManager.CombatService.ObtenerEstadisticasCombate(player)
+							else { DanioTotalCausado = 0, EnemigosDerrotados = 0, Magias = {} })
+					local tiempoSobrevivido = GameManager.TiempoMuerteJugador[player] or GameManager.TiempoLogicoSegundos
+
+					local reporte: TiposAlpha.ResultadosExpedicionIndividual = {
+						Resultado = resultadoStr,
+						TiempoSobrevividoSegundos = math.max(0, math.floor(tiempoSobrevivido)),
+						NivelAlcanzado = nivel,
+						EnemigosDerrotados = statsCombate.EnemigosDerrotados or 0,
+						JefesDerrotados = jefesDerrotados,
+						OroObtenido = oroPlaceholder,
+						GemasObtenidas = gemasPlaceholder,
+						DanioTotalCausado = statsCombate.DanioTotalCausado or 0,
+						MagiasUtilizadas = statsCombate.Magias or {},
+					}
+					GameManager.RemoteResultados:FireClient(player, reporte)
+				end
+			end
+		end
+
+		-- Actualizar estado de todos los jugadores conectados en caso de derrota
+		if nuevoEstado == "GameOver" then
+			for player, _ in GameManager.JugadoresConectados do
+				local est = GameManager.EstadosJugadores[player]
+				if est ~= "ReturningToLobby" and est ~= "Returned" then
+					GameManager.EstadosJugadores[player] = "Dead"
+					GameManager.NotificarEstadoIndividual(player)
+				end
 			end
 		end
 
@@ -294,21 +530,34 @@ function GameManager.CambiarEstado(nuevoEstado: EstadoPartida): boolean
 			GameManager.CombatService.Detener()
 		end
 
-		-- 4. Si estamos en la Expedición, preparar el retorno ordenado al Lobby
+		-- 4. Detener el servicio de progresión y limpiar orbes
+		if GameManager.ProgressionService and GameManager.ProgressionService.Detener then
+			GameManager.ProgressionService.Detener()
+		end
+
+		-- 5. Detener el servicio del Jefe Final y limpiar telégrafos
+		if GameManager.BossService and GameManager.BossService.Detener then
+			GameManager.BossService.Detener()
+		end
+
+		-- 6. Detener el servicio de reconexión y limpiar ventanas activas
+		if GameManager.ReconnectionService and GameManager.ReconnectionService.Detener then
+			GameManager.ReconnectionService.Detener()
+		end
+
+		-- 7. Si estamos en la Expedición, desactivar reaparición y establecer timeout de seguridad de 180s
 		if PlacesConfig.EsExpedicion() then
-			-- Desactivar reaparición automática para evitar reaparecer en la arena destruida
 			Players.CharacterAutoLoads = false
 
-			-- Esperar 6 segundos para que los jugadores visualicen el resultado en pantalla
-			task.delay(6, function()
-				if GameManager.EstadoActual == "GameOver" then
+			task.delay(180, function()
+				if GameManager.EstadoActual == nuevoEstado then
 					GameManager.CambiarEstado("ReturningToLobby")
 				end
 			end)
 		else
 			-- Si por alguna razón ocurrió en el lobby, resetear a Waiting tras 4 segundos
 			task.delay(4, function()
-				if GameManager.EstadoActual == "GameOver" then
+				if GameManager.EstadoActual == nuevoEstado then
 					GameManager.CambiarEstado("Waiting")
 				end
 			end)
@@ -403,9 +652,53 @@ function GameManager.OnPlayerAdded(player: Player)
 	GameManager.ConexionesPersonajes[player] = {}
 	print(string.format("[UMBRA Server] Jugador conectado: %s (UserId: %d)", player.Name, player.UserId))
 
+	-- Leer de forma segura TeleportData para respetar el modo enviado desde el Lobby y registrar reconexión
+	if PlacesConfig.EsExpedicion() then
+		local exitoJoin, joinData = pcall(function()
+			return player:GetJoinData()
+		end)
+		if exitoJoin and typeof(joinData) == "table" and typeof(joinData.TeleportData) == "table" then
+			local modoTP = joinData.TeleportData.ModoExpedicion
+			local accessCode = joinData.TeleportData.ReservedServerAccessCode
+			if not GameManager.ModoAutoritativoTeleport and (modoTP == "Coop" or modoTP == "Solo") then
+				GameManager.ModoAutoritativoTeleport = modoTP
+				print(string.format("[UMBRA Server] TeleportData detectado para %s -> ModoExpedicion: %s", player.Name, modoTP))
+			end
+			if GameManager.ReconnectionService and typeof(GameManager.ReconnectionService.RegistrarParticipanteAutorizado) == "function" then
+				local modoReg = if modoTP == "Coop" or modoTP == "Solo" then modoTP else GameManager.ModoExpedicion
+				GameManager.ReconnectionService.RegistrarParticipanteAutorizado(player.UserId, accessCode, modoReg)
+			end
+		end
+
+		-- Si el jugador regresa dentro de la ventana de reconexión (180s)
+		if GameManager.EstadoActual == "Playing" and GameManager.ReconnectionService
+			and typeof(GameManager.ReconnectionService.TieneSnapshotVigente) == "function"
+			and GameManager.ReconnectionService.TieneSnapshotVigente(player.UserId) then
+			if GameManager.ReconnectionService.IntentarReconectarJugador(player) then
+				GameManager.JugadoresVivos[player] = true
+				GameManager.EstadosJugadores[player] = "Alive"
+				GameManager.NotificarSupervivientes()
+			end
+		elseif GameManager.ParticipantesEquipo[player.UserId] then
+			-- Si había muerto previamente en esta expedición, mantener eliminación permanente
+			local prev = GameManager.ParticipantesEquipo[player.UserId]
+			if prev.Estado == "Dead" or prev.Estado == "Spectating" then
+				GameManager.JugadoresVivos[player] = false
+				GameManager.EstadosJugadores[player] = if GameManager.ModoExpedicion == "Coop" then "Spectating" else "Dead"
+			end
+		end
+	end
+
 	-- Sincronizar estado global e individual inmediatamente
 	if GameManager.RemoteSincronizar then
 		GameManager.RemoteSincronizar:FireClient(player, GameManager.EstadoActual)
+	end
+	if PlacesConfig.EsExpedicion() and GameManager.RemoteSincronizarReloj then
+		GameManager.RemoteSincronizarReloj:FireClient(player, {
+			TiempoLogicoSegundos = GameManager.TiempoLogicoSegundos,
+			MultiplicadorTiempo = GameManager.MultiplicadorTiempo,
+			ModoAceleradoActivo = GameManager.ModoAceleradoActivo,
+		})
 	end
 	GameManager.NotificarEstadoIndividual(player)
 
@@ -446,15 +739,47 @@ function GameManager.OnPlayerRemoving(player: Player)
 
 	print(string.format("[UMBRA Server] Jugador desconectado: %s", player.Name))
 
-	-- Si estamos en juego y el jugador estaba vivo, actualizar lista de supervivientes
+	-- Si estamos en juego y el jugador estaba vivo, guardar snapshot de reconexión (180s)
 	if GameManager.EstadoActual == "Playing" then
 		if estabaVivo then
+			if PlacesConfig.EsExpedicion() and GameManager.ReconnectionService and typeof(GameManager.ReconnectionService.GuardarSnapshotDesconexion) == "function" then
+				GameManager.ReconnectionService.GuardarSnapshotDesconexion(player)
+			end
+			if GameManager.ParticipantesEquipo[player.UserId] then
+				GameManager.ParticipantesEquipo[player.UserId].Vivo = false
+				GameManager.ParticipantesEquipo[player.UserId].Estado = "Disconnected"
+				GameManager.ParticipantesEquipo[player.UserId].SaludActual = 0
+			end
 			GameManager.NotificarSupervivientes()
 		end
 
 		local vivos = GameManager.ObtenerTotalJugadoresVivos()
-		if vivos == 0 then
-			print("[UMBRA Server] No quedan supervivientes activos en la expedición tras la desconexión.")
+		local hayPendientes = if GameManager.ReconnectionService and typeof(GameManager.ReconnectionService.HayReconexionesPendientes) == "function"
+			then GameManager.ReconnectionService.HayReconexionesPendientes()
+			else false
+
+		if vivos == 0 and not hayPendientes then
+			print("[UMBRA Server] No quedan supervivientes activos ni reconexiones pendientes en la expedición.")
+			GameManager.CambiarEstado("GameOver")
+		elseif vivos == 0 and hayPendientes then
+			print("[UMBRA Server] Último jugador vivo desconectado. Esperando ventana de reconexión (180s)...")
+		end
+	end
+end
+
+-- Callback invocado por ReconnectionService cuando expira la ventana de 180s de un jugador
+function GameManager.OnReconexionExpirada(userId: number)
+	GameManager.ParticipantesEquipo[userId] = nil
+	GameManager.NotificarSupervivientes()
+
+	if GameManager.EstadoActual == "Playing" then
+		local vivos = GameManager.ObtenerTotalJugadoresVivos()
+		local hayPendientes = if GameManager.ReconnectionService and typeof(GameManager.ReconnectionService.HayReconexionesPendientes) == "function"
+			then GameManager.ReconnectionService.HayReconexionesPendientes()
+			else false
+
+		if vivos == 0 and not hayPendientes then
+			print("[UMBRA Server] Ventana de reconexión expirada sin supervivientes activos. Declarando GameOver.")
 			GameManager.CambiarEstado("GameOver")
 		end
 	end
@@ -462,6 +787,18 @@ end
 
 -- Manejador de ciclo de vida del personaje (muerte autoritativa)
 function GameManager.OnCharacterAdded(player: Player, character: Model)
+	-- Impedir revivir/reaparecer si el jugador ya fue eliminado en esta expedición (Sección 12)
+	local estadoActualJugador = GameManager.EstadosJugadores[player]
+	if PlacesConfig.EsExpedicion() and (estadoActualJugador == "Dead" or estadoActualJugador == "Spectating") then
+		GameManager.JugadoresVivos[player] = false
+		task.defer(function()
+			if character and character.Parent then
+				character:Destroy()
+			end
+		end)
+		return
+	end
+
 	local humanoid = character:WaitForChild("Humanoid", 10) :: Humanoid?
 	if not humanoid then return end
 
@@ -481,6 +818,15 @@ function GameManager.OnCharacterAdded(player: Player, character: Model)
 
 		GameManager.JugadoresVivos[player] = false
 		GameManager.EstadosJugadores[player] = "Dead"
+		if not GameManager.TiempoMuerteJugador[player] then
+			GameManager.TiempoMuerteJugador[player] = GameManager.TiempoLogicoSegundos
+		end
+		if GameManager.CombatService and typeof(GameManager.CombatService.ObtenerEstadisticasCombate) == "function" then
+			GameManager.EstadisticasFinalesJugador[player] = GameManager.CombatService.ObtenerEstadisticasCombate(player)
+		end
+		if GameManager.ProgressionService and typeof(GameManager.ProgressionService.ObtenerNivelJugador) == "function" then
+			GameManager.NivelesFinalesJugador[player] = GameManager.ProgressionService.ObtenerNivelJugador(player)
+		end
 		print(string.format("[UMBRA Server] Superviviente %s ha caído.", player.Name))
 
 		-- Desactivar de inmediato cualquier participación en combate

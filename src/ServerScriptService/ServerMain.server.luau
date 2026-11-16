@@ -48,25 +48,35 @@ end
 local EnemyService = nil :: any
 local SpawnerService = nil :: any
 local CombatService = nil :: any
+local ProgressionService = nil :: any
+local BossService = nil :: any
+local ReconnectionService = nil :: any
 local MatchmakingService = nil :: any
 
 if PlacesConfig.EsLobby() then
 	-- =========================================================================
 	-- PLACE 1: LOBBY (Santuario del Último Resplandor)
 	-- No se cargan enemigos, ni oleadas, ni combate automático.
-	-- Solo se inicia el portal de emparejamiento.
+	-- Solo se inicia el portal de emparejamiento y la reconexión.
 	-- =========================================================================
 	print("[ServerMain] Configurando entorno de LOBBY: Hordas, Spawner y Combate DESHABILITADOS.")
 
+	local reconModulo = ServicesFolder:WaitForChild("ReconnectionService") :: ModuleScript
+	local _, reconInst = inicializarServicio("ReconnectionService", reconModulo, GameManager)
+	ReconnectionService = reconInst
+
 	local matchmakingModulo = ServicesFolder:WaitForChild("MatchmakingService") :: ModuleScript
-	local exitoMM, mmInst = inicializarServicio("MatchmakingService", matchmakingModulo, GameManager)
+	local _, mmInst = inicializarServicio("MatchmakingService", matchmakingModulo, GameManager)
 	MatchmakingService = mmInst
+
+	if MatchmakingService and typeof(MatchmakingService.VincularReconnectionService) == "function" and ReconnectionService then
+		MatchmakingService.VincularReconnectionService(ReconnectionService)
+	end
 
 else
 	-- =========================================================================
 	-- PLACE 2: EXPEDICIÓN (Arena de Supervivencia)
-	-- Se cargan e inician los sistemas de combate, oleadas y hordas.
-	-- No se inicia el sistema de emparejamiento.
+	-- Se cargan e inician los sistemas de combate, oleadas, progresión, jefe y reconexión.
 	-- =========================================================================
 	print("[ServerMain] Configurando entorno de EXPEDICIÓN: Hordas, Spawner y Combate HABILITADOS.")
 
@@ -82,33 +92,71 @@ else
 	local _, combatInst = inicializarServicio("CombatService", combatModulo, EnemyService)
 	CombatService = combatInst
 
+	local progressionModulo = ServicesFolder:WaitForChild("ProgressionService") :: ModuleScript
+	local _, progressionInst = inicializarServicio("ProgressionService", progressionModulo, CombatService, GameManager)
+	ProgressionService = progressionInst
+
+	if EnemyService and typeof(EnemyService.EstablecerCallbackEliminacion) == "function" and ProgressionService then
+		EnemyService.EstablecerCallbackEliminacion(ProgressionService.OnEnemigoEliminado)
+	end
+
+	local bossModulo = ServicesFolder:WaitForChild("BossService") :: ModuleScript
+	local _, bossInst = inicializarServicio("BossService", bossModulo, EnemyService, GameManager)
+	BossService = bossInst
+
+	local reconModulo = ServicesFolder:WaitForChild("ReconnectionService") :: ModuleScript
+	local _, reconInst = inicializarServicio("ReconnectionService", reconModulo, GameManager, CombatService, ProgressionService, EnemyService)
+	ReconnectionService = reconInst
+
+	if EnemyService and typeof(EnemyService.VincularReconnectionService) == "function" and ReconnectionService then
+		EnemyService.VincularReconnectionService(ReconnectionService)
+	end
+	if BossService and typeof(BossService.VincularReconnectionService) == "function" and ReconnectionService then
+		BossService.VincularReconnectionService(ReconnectionService)
+	end
+	if SpawnerService and typeof(SpawnerService.VincularBossService) == "function" and BossService then
+		SpawnerService.VincularBossService(BossService)
+	end
+
 	if GameManager.VincularServicios then
-		GameManager.VincularServicios(SpawnerService, EnemyService, CombatService)
+		GameManager.VincularServicios(SpawnerService, EnemyService, CombatService, ProgressionService, BossService, ReconnectionService)
 	end
 end
 
 -- 2. Gestión del ciclo de vida de jugadores
 local function registrarJugador(player: Player)
-	local exitoGMPlayer, errGM = pcall(GameManager.OnPlayerAdded, player)
-	if not exitoGMPlayer then
-		warn(string.format("[ServerMain] Error al registrar GameManager para %s: %s", player.Name, tostring(errGM)))
-	end
-
-	-- Registrar combate únicamente si estamos en la Expedición
+	-- Registrar combate y progresión antes de GameManager.OnPlayerAdded para permitir restauración de snapshot
 	if CombatService and typeof(CombatService.RegistrarJugador) == "function" then
 		local exitoCombatReg, errCombat = pcall(CombatService.RegistrarJugador, player)
 		if not exitoCombatReg then
 			warn(string.format("[ServerMain] Error al registrar CombatService para %s: %s", player.Name, tostring(errCombat)))
 		end
 	end
+
+	if ProgressionService and typeof(ProgressionService.RegistrarJugador) == "function" then
+		local exitoProgReg, errProg = pcall(ProgressionService.RegistrarJugador, player)
+		if not exitoProgReg then
+			warn(string.format("[ServerMain] Error al registrar ProgressionService para %s: %s", player.Name, tostring(errProg)))
+		end
+	end
+
+	local exitoGMPlayer, errGM = pcall(GameManager.OnPlayerAdded, player)
+	if not exitoGMPlayer then
+		warn(string.format("[ServerMain] Error al registrar GameManager para %s: %s", player.Name, tostring(errGM)))
+	end
 end
 
 local function desregistrarJugador(player: Player)
+	-- GameManager.OnPlayerRemoving captura el snapshot antes de limpiar perfiles de combate y progresión
+	pcall(GameManager.OnPlayerRemoving, player)
+
+	if ProgressionService and typeof(ProgressionService.DesregistrarJugador) == "function" then
+		pcall(ProgressionService.DesregistrarJugador, player)
+	end
+
 	if CombatService and typeof(CombatService.DesregistrarJugador) == "function" then
 		pcall(CombatService.DesregistrarJugador, player)
 	end
-
-	pcall(GameManager.OnPlayerRemoving, player)
 end
 
 Players.PlayerAdded:Connect(registrarJugador)
